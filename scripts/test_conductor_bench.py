@@ -2748,15 +2748,22 @@ class PlanAndCellTests(unittest.TestCase):
         )
 
     def test_a_denied_read_is_the_harness_failing(self):
-        """[D12-denied-read] a cell refused a tool call on a path inside its own
-        work tree is scored `harness-error`, not `fail`.
+        """[D12-denied-read] a cell refused a tool call on a path INSIDE its own
+        work tree is scored `harness-error`; one refused a path outside it is
+        not.
 
         opencode does not error when it denies a call: it prints the refusal,
-        hands the model an error string, and exits cleanly. The model stops,
-        having been told it may not read its own repository, and the cell lands
-        as an ordinary gauge failure with an empty diff — a harness fault
-        charged to the arm, and indistinguishable in the results from the arm
-        having simply not done the work.
+        hands the model an error string, and exits cleanly. The model stops and
+        the cell lands as an ordinary gauge failure with an empty diff — a
+        harness fault charged to the arm, and indistinguishable in the results
+        from the arm having simply not done the work.
+
+        The second half of this is the correction to the first. Keying on the
+        presence of a refusal rather than on its path, an arm that walked out of
+        its repository to read the harness's own config was refused correctly and
+        scored `harness-error` — which, because that outcome excludes
+        symmetrically, would have thrown away the other two arms' cells for that
+        task as well.
         """
         task = self.tasks[0]
 
@@ -2769,27 +2776,44 @@ class PlanAndCellTests(unittest.TestCase):
 
             return runner
 
-        denial = (
-            "! permission requested: external_directory "
-            "(/private/var/folders/6h/xxx/T/w/repo/src/solvers/*); auto-rejecting\n"
-        )
-        for label, line, expected in (
-            ("denied", denial, "harness-error"),
-            ("ordinary", "→ Read src/cli.py\n", "fail"),
-        ):
-            cell = make_cell("doctrine", task.id, 1)
+        def denial_of(path: str) -> str:
+            return (
+                "! permission requested: external_directory (%s); auto-rejecting\n"
+                "Error: The user rejected permission to use this specific tool call.\n" % path
+            )
+
+        # The path decides it. A refusal INSIDE the tree is the harness denying
+        # the arm its own files. A refusal OUTSIDE it is the arm reaching for
+        # something it has no claim to — the harness's own config, in the run
+        # that prompted this — and that is the arm's dead end, not ours. Calling
+        # the second one a harness error is worse than mis-scoring one cell:
+        # `harness-error` excludes symmetrically, so it discards the other two
+        # arms' cells for that task as well.
+        cases = []
+        for label, arm in (("inside", "doctrine"), ("outside", "doctrine"), ("ordinary", "doctrine")):
+            cell = make_cell(arm, task.id, 1)
+            directory = cb.cell_dir_for(self.tmp / ("denied-%s" % label), cell)
+            if label == "inside":
+                line, expected = denial_of(str(directory / "repo" / "src" / "*")), "harness-error"
+            elif label == "outside":
+                line, expected = denial_of(str(directory / "*")), "fail"
+            else:
+                line, expected = "→ Read src/cli.py\n", "fail"
+            cases.append((label, cell, directory, line, expected))
+
+        for label, cell, directory, line, expected in cases:
             result = cb.run_cell(
                 cell,
                 task,
-                cell_dir=cb.cell_dir_for(self.tmp / ("denied-%s" % label), cell),
+                cell_dir=directory,
                 model=SENTINEL_MODEL,
                 router_config=ROUTER_CONFIG,
                 base_config=BASE_OPENCODE_CONFIG,
                 per_slot_ctx=SERVED_CTX,
                 timeout_sec=5,
                 runner=runner_writing(line),
-                # The gauge fails either way: the point is that only one of the
-                # two is the arm's doing.
+                # The gauge fails in all three: the point is which of them is
+                # the arm's doing.
                 test_runner=lambda argv, cwd, timeout_sec: cb.CommandOutcome(1, False, None, 1),
                 git_runner=lambda argv, cwd: None,
             )

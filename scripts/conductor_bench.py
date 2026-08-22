@@ -228,6 +228,13 @@ TOKEN_KEYS = ("prompt", "completion", "total", "partial")
 # recorded as an ordinary gauge failure.
 PERMISSION_REJECTION_MARKERS = ("auto-rejecting", "rejected permission to use")
 
+# The path opencode names when it refuses one, as it appears in the transcript:
+#   ! permission requested: external_directory (/abs/path/*); auto-rejecting
+# Whether that path lies inside the arm's own tree is what separates the
+# harness's fault from the arm's, so a refusal that names no readable path is
+# not evidence of either.
+DENIED_PATH_RE = re.compile(r"external_directory \(([^)]*)\)")
+
 # A cell that never reached the model at all. Every arm's first act is to ask
 # the model something, so a cell whose window of the router ledger holds no
 # requests did not run: the model was unreachable, or the session died before it
@@ -1957,20 +1964,45 @@ def default_cell_invocation_runner(invocation: CellInvocation) -> CommandOutcome
     )
 
 
-def denied_own_tree(log_path: Any) -> bool:
+def denied_own_tree(log_path: Any, work_dir: Any) -> bool:
     """Whether the cell was refused a tool call on a path inside its own tree.
 
     Read from the transcript rather than from an exit code, because opencode
     does not fail on a denial: it prints the refusal, hands the model an error
-    string, and carries on. The model then stops, having been told it may not
-    read its own repository, and the run exits cleanly with an empty diff. The
-    only signal that anything went wrong is the line in the transcript.
+    string, and carries on. The model then stops and the run exits cleanly with
+    an empty diff, so the line in the transcript is the only signal.
+
+    The PATH decides this, not the presence of a refusal. An arm that walks out
+    of its repository to read the harness's own files is refused correctly, and
+    that refusal is the arm's business: it asked for something it had no claim
+    to. Only a refusal on a path inside the tree the arm was given is the
+    harness's fault.
+
+    The distinction is not cosmetic. `harness-error` excludes a cell
+    SYMMETRICALLY, taking the other arms' cells for that task with it, so
+    calling an arm's own dead end a harness fault discards two innocent cells
+    as well. A refusal whose path cannot be read is therefore left alone:
+    proving the path is inside the tree is required before anything is excluded.
     """
     try:
         text = Path(log_path).read_bytes().decode("utf-8", errors="replace")
     except OSError:
         return False
-    return any(marker in text for marker in PERMISSION_REJECTION_MARKERS)
+    if not any(marker in text for marker in PERMISSION_REJECTION_MARKERS):
+        return False
+    try:
+        tree = Path(work_dir).resolve()
+    except OSError:
+        return False
+    for denied in DENIED_PATH_RE.findall(text):
+        candidate = Path(denied.rstrip("*").rstrip("/") or "/")
+        try:
+            candidate = candidate.resolve()
+        except OSError:
+            continue
+        if candidate == tree or tree in candidate.parents:
+            return True
+    return False
 
 
 def score_cell(
@@ -2097,7 +2129,7 @@ def run_cell(
     # run, and the gauge adds nothing to either.
     window = summarize_ledger_window(ledger, ledger_before)
     fault = None
-    if denied_own_tree(directory / "opencode.log"):
+    if denied_own_tree(directory / "opencode.log", work):
         fault = "a tool call was denied on a path inside the cell's own tree"
     elif window["requests"] == EMPTY_RUN_REQUESTS:
         fault = "the cell reached the model zero times"
