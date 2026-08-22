@@ -97,6 +97,13 @@ ALWAYS_IGNORED_DIR_NAMES = frozenset(
 ALWAYS_IGNORED_NAMES = frozenset({".DS_Store", "Thumbs.db"})
 ALWAYS_IGNORED_SUFFIXES = (".pyc", ".pyo")
 DOCTRINE_DIR = REPO_ROOT / "conductor" / "doctrine"
+
+# The observer, run once per conductor cell after the cell ends, so the view it
+# renders survives the work tree it was rendered from. Its budget is generous
+# because it reads a whole run's journal and joins it against the ledger, and
+# short because nothing downstream waits on it.
+OBSERVE_TOOL = REPO_ROOT / "conductor" / "tools" / "observe.ts"
+OBSERVE_TIMEOUT_SECONDS = 120
 FRAGMENT_PATH = REPO_ROOT / "conductor" / "opencode-fragment.json"
 ROUTER_CONFIG_PATH = REPO_ROOT / conductor_wiring.ROUTER_CONFIG_RELPATH
 
@@ -2374,6 +2381,59 @@ def summarize_ledger_window(ledger_path: Any, start_line: int) -> Dict[str, Any]
 # ---------------------------------------------------------------------------
 
 
+def capture_observation(results_dir: Any, cell: "Cell", work_dir: Any) -> List[str]:
+    """Write the observer's own view of a finished conductor run, durably.
+
+    Beside the RESULT, not beside the cell. The cell directory lives under the
+    work root, and the work root is deleted at the start of the next run — so
+    the one place this could be written that would certainly not survive is the
+    place it came from.
+
+    Everything here is already computed — by `conductor/tools/observe.ts`, for
+    the live console — and then thrown away when the run ends, because the
+    console only exists while somebody is watching. What survives is the
+    journal, and the journal records the tool calls that SUCCEEDED. It does not
+    record a turn that called nothing, or called something other than the
+    recommended tool, so a stretch where the orchestrator is taking turns and
+    getting nowhere appears in the journal as a gap with no events in it. One
+    such gap was 8.3 minutes and could only be characterised by inference.
+
+    The console also separates two costs the journal reports as one. A turn
+    carries `gen` (the model generating) and `up` (the whole upstream call), and
+    the difference is time queued behind another slot: one turn read
+    `gen=1s up=1m55s`, which is 1m54s of waiting recorded nowhere else, and
+    three concurrent reviewers read `gen=9m14s up=9m13s`, which is the opposite
+    — genuinely nine minutes of generation each.
+
+    Read-only, after the process has exited, and never allowed to fail a cell:
+    an observation that breaks the run it observes is worse than no observation.
+    """
+    written: List[str] = []
+    run_dir = newest_run_dir(work_dir)
+    if run_dir is None:
+        return written
+    destination = Path(results_dir) / "observed"
+    try:
+        destination.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return written
+    stem = cell.cell_id.replace("/", "__")
+    for flag, suffix in (("--console", "turns.txt"), ("--json", "snapshot.json")):
+        target = destination / ("%s.%s" % (stem, suffix))
+        try:
+            done = subprocess.run(
+                ["node", str(OBSERVE_TOOL), str(run_dir), flag],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                timeout=OBSERVE_TIMEOUT_SECONDS,
+            )
+            target.write_bytes(done.stdout)
+            written.append(str(target))
+        except (OSError, subprocess.SubprocessError):
+            continue
+    return written
+
+
 def collect_metrics(arm: str, work_dir: Any) -> Dict[str, Any]:
     """The four conductor-only metrics, or null for the arms that cannot have them.
 
@@ -3759,8 +3819,13 @@ def run_benchmark(
                 skipped.append(cell.cell_id)
                 rows.append(json.loads(recorded.read_text()))
                 continue
-            row = runner(cell, by_task[cell.task_id], cell_dir_for(root, cell))
+            work = cell_dir_for(root, cell)
+            row = runner(cell, by_task[cell.task_id], work)
             write_result(results_path, row)
+            # Only the conductor arm keeps a journal, so only it has anything to
+            # observe. Read-only, after the fact, and never fatal.
+            if cell.arm == "conductor":
+                capture_observation(results_path, cell, Path(work) / "repo")
             executed.append(cell.cell_id)
             rows.append(row)
 

@@ -2961,6 +2961,42 @@ class PlanAndCellTests(unittest.TestCase):
                 rw.sleep_guard(), [], "a platform without caffeinate still runs"
             )
 
+    def test_the_observed_view_is_written_where_it_survives(self):
+        """[D22-observe-capture] the observer's per-turn view is written beside
+        the RESULT, not beside the cell, and never fails the cell.
+
+        The per-turn table — recommended tool against tool called, generation
+        time against upstream time — is computed by observe.ts for the live
+        console and then discarded, because the console only exists while
+        somebody is watching. The journal that survives records the calls that
+        succeeded, so a stretch of turns that called nothing appears in it as a
+        gap with no events in it.
+
+        Beside the result rather than beside the cell because the cell directory
+        is under the work root, and the work root is deleted at the start of the
+        next run: the one place this could be written that would certainly not
+        survive is the place it came from.
+        """
+        results = self.tmp / "results"
+        cell = make_cell("conductor", TASK_IDS[0], 1)
+
+        # No run directory to read: nothing written, nothing raised.
+        empty = self.tmp / "no-run"
+        (empty / ".conductor").mkdir(parents=True, exist_ok=True)
+        self.assertEqual(cb.capture_observation(results, cell, empty), [])
+
+        # An unwritable destination is also survivable — an observation that
+        # breaks the run it observes is worse than no observation.
+        blocked = self.tmp / "blocked"
+        blocked.write_text("not a directory")
+        self.assertEqual(cb.capture_observation(blocked, cell, empty), [])
+
+        self.assertTrue(
+            cb.OBSERVE_TOOL.name.endswith(".ts"),
+            "the observer is the same tool the live console runs",
+        )
+        self.assertGreater(cb.OBSERVE_TIMEOUT_SECONDS, 0)
+
     def test_hidden_never_visible(self):
         """[14.1-hidden-never-visible] the hidden tests never reach the model:
         seed and hidden paths are disjoint, no arm's prompt/argv/env/config
