@@ -228,6 +228,22 @@ TOKEN_KEYS = ("prompt", "completion", "total", "partial")
 # recorded as an ordinary gauge failure.
 PERMISSION_REJECTION_MARKERS = ("auto-rejecting", "rejected permission to use")
 
+# A cell that never reached the model at all. Every arm's first act is to ask
+# the model something, so a cell whose window of the router ledger holds no
+# requests did not run: the model was unreachable, or the session died before it
+# spoke. Scoring that as a failed attempt charges the arm for the environment.
+#
+# Seen when the machine slept mid-run: a baseline cell produced a 78-byte
+# transcript holding the agent banner and `Error: The operation timed out.`,
+# made no requests at all, wrote nothing, and was recorded `fail` against its
+# arm.
+#
+# The count is the signal rather than the token total. An empty window and an
+# unreadable ledger both report `partial`, and a window whose lines carry no
+# token fields reports a total of zero while the cell plainly ran; only
+# `requests` separates "asked the model nothing" from "we cannot tell".
+EMPTY_RUN_REQUESTS = 0
+
 # The hidden suite's verdict on the tree the cell left behind, recorded on its
 # own axis. `outcome` answers "did this arm deliver inside its wall clock";
 # `gauge` answers "was the work correct", and a cell that ran out of clock while
@@ -1846,7 +1862,10 @@ def run_command(
     opencode spawns children, so terminating the direct child alone leaves them
     running and the next cell inherits a machine that is still busy.
     """
-    started = time.time()
+    # Monotonic: this is the clock Popen.wait counts its timeout down on, and
+    # _elapsed_ms reads it back. See _elapsed_ms for why the wall clock is the
+    # wrong one to measure a cell with.
+    started = time.monotonic()
     handle = None
     if log_path is not None:
         Path(log_path).parent.mkdir(parents=True, exist_ok=True)
@@ -1877,7 +1896,18 @@ def run_command(
 
 
 def _elapsed_ms(started: float) -> int:
-    return int(round((time.time() - started) * 1000.0))
+    """Milliseconds since `started`, which must be a `time.monotonic()` reading.
+
+    Monotonic rather than wall clock, because the two disagree by exactly the
+    thing a cost measurement must not contain. `Popen.wait(timeout=...)` counts
+    down on the monotonic clock, and on this platform that clock stops while the
+    machine is asleep. Measured on the wall clock, a cell that slept through part
+    of its run reports the sleep as the arm's cost and can report an elapsed time
+    longer than the budget that was supposedly enforcing it — a 60-minute cell
+    was recorded at 86.8 minutes, and neither number was wrong for the clock it
+    came from.
+    """
+    return int(round((time.monotonic() - started) * 1000.0))
 
 
 def _kill_process_group(process: "subprocess.Popen") -> None:
@@ -1947,18 +1977,20 @@ def score_cell(
     exit_code: Optional[int],
     timed_out: bool,
     spawn_error: Optional[str],
-    denied: bool = False,
+    harness_fault: Optional[str] = None,
 ) -> Dict[str, Any]:
     """The hidden test's exit status, passed through and nothing else.
 
     A spawn failure is the harness failing, never the model failing, so it is
     kept out of the fail bucket even when an exit code happens to be present.
-    A denied read is the same kind of thing one layer up: the arm was stopped by
-    the environment rather than by the task, and scoring it as a failure would
-    charge the arm for the harness's mistake. Both land on `harness-error`,
-    which `exclusion_reason` already drops symmetrically across the arms.
+    `harness_fault` names anything else of that kind found after the fact — a
+    tool call denied on the cell's own tree, a cell that never reached the model
+    — where the arm was stopped by the environment rather than by the task, and
+    scoring it a failure would charge the arm for the harness's mistake. All of
+    them land on `harness-error`, which `exclusion_reason` already drops
+    symmetrically across the arms.
     """
-    if denied:
+    if harness_fault:
         return {"passed": False, "outcome": "harness-error", "exitCode": exit_code}
     if spawn_error:
         return {"passed": False, "outcome": "harness-error", "exitCode": exit_code}
@@ -2061,11 +2093,18 @@ def run_cell(
     # stay separate: `score` is delivery inside the wall clock, `gauge` is
     # correctness of the tree left behind.
     gauge = {"ran": False, "passed": None, "exitCode": None}
-    denied = denied_own_tree(directory / "opencode.log")
+    # Both of these are read BEFORE the gauge runs: they describe the arm's own
+    # run, and the gauge adds nothing to either.
+    window = summarize_ledger_window(ledger, ledger_before)
+    fault = None
+    if denied_own_tree(directory / "opencode.log"):
+        fault = "a tool call was denied on a path inside the cell's own tree"
+    elif window["requests"] == EMPTY_RUN_REQUESTS:
+        fault = "the cell reached the model zero times"
     if run_outcome.spawn_error:
         # Nothing ran, so there is no work to measure - only the seed.
         score = score_cell(
-            run_outcome.exit_code, run_outcome.timed_out, run_outcome.spawn_error, denied
+            run_outcome.exit_code, run_outcome.timed_out, run_outcome.spawn_error, fault
         )
     else:
         materialize_files(work, task.hidden_files)
@@ -2083,17 +2122,16 @@ def run_cell(
         if run_outcome.timed_out:
             # The wall clock is already spent; the gauge is measurement taken
             # after the fact and does not belong in the cell's recorded cost.
-            score = score_cell(None, True, None, denied)
+            score = score_cell(None, True, None, fault)
         else:
             wall_clock_ms += test_outcome.wall_clock_ms
             score = score_cell(
                 test_outcome.exit_code,
                 test_outcome.timed_out,
                 test_outcome.spawn_error,
-                denied,
+                fault,
             )
 
-    window = summarize_ledger_window(ledger, ledger_before)
     metrics = collect_metrics(cell.arm, work)
 
     result = {
@@ -2244,12 +2282,15 @@ def summarize_ledger_window(ledger_path: Any, start_line: int) -> Dict[str, Any]
         with open(str(ledger_path), "r") as handle:
             lines = handle.readlines()
     except OSError:
+        # No ledger to read is not the same claim as an empty one, and `requests`
+        # says so: None means unknown, 0 means the cell asked the model nothing.
         return {
             "prompt": None,
             "completion": None,
             "total": None,
             "partial": True,
             "routerErrors": 0,
+            "requests": None,
         }
 
     window = lines[start_line:]
@@ -2257,6 +2298,7 @@ def summarize_ledger_window(ledger_path: Any, start_line: int) -> Dict[str, Any]
     completion = 0
     partial = not window
     router_errors = 0
+    requests = 0
     for line in window:
         text = line.strip()
         if not text:
@@ -2269,6 +2311,7 @@ def summarize_ledger_window(ledger_path: Any, start_line: int) -> Dict[str, Any]
         if not isinstance(record, dict):
             partial = True
             continue
+        requests += 1
         status = record.get("status")
         if isinstance(status, int) and not isinstance(status, bool):
             if status < 200 or status >= 300:
@@ -2290,6 +2333,7 @@ def summarize_ledger_window(ledger_path: Any, start_line: int) -> Dict[str, Any]
         "total": prompt + completion,
         "partial": partial,
         "routerErrors": router_errors,
+        "requests": requests,
     }
 
 

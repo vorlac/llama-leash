@@ -86,7 +86,7 @@ MANIFEST = "bench/conductor-tasks.json"
 #
 #   TASKS = []                    every task
 #   TASKS = ["euler-001-py"]      one task (also set MANIFEST to its set)
-TASKS: List[str] = ["slugify-ts", "euler-cli-py", "logfmt-lenses-ts", "clock-inject-py",]
+TASKS: List[str] = ["slugify-ts", "euler-cli-py", "logfmt-lenses-ts", "clock-inject-py"]
 
 # Which tiers to run. Empty means every tier present in the manifest. Tiers are
 # a wall-clock budget per cell, not a difficulty rating: T0 1800s, T1 2700s,
@@ -190,6 +190,23 @@ AUTO_SERVE = True
 # How long to wait for the weights to load before giving up. A 27B model off a
 # cold page cache is minutes, not seconds, and the wait is mostly disk.
 SERVE_READY_TIMEOUT_SECONDS = 600
+
+# Hold system sleep off while the run is in progress.
+#
+# A benchmark is a long stretch of a machine sitting at a prompt waiting for a
+# local model, which looks exactly like an idle machine. When this Mac slept
+# mid-run it broke the measurement three separate ways: the cell budget is
+# counted down on a clock that stops during sleep while the recorded elapsed was
+# wall time, so a 60-minute cell was recorded at 86.8 minutes and never tripped
+# its own timeout; a cell woke to find the model unreachable, spent zero tokens
+# and was scored a failure against its arm; and every wall clock in the run
+# silently included time nothing was running.
+#
+# `caffeinate -is` asserts "no idle sleep" and "no system sleep" for as long as
+# the process it wraps lives, so the assertion is released when the run ends
+# however it ends. Display sleep is deliberately left alone: the screen may go
+# dark, the machine may not.
+PREVENT_SLEEP = True
 
 # The served window, as slots x tokens-per-slot.
 #
@@ -347,7 +364,26 @@ def bench_argv(results: str, plan_only: bool) -> List[str]:
         argv += ["--work-root", work_root()]
     if plan_only:
         argv += ["--plan-only"]
-    return argv
+    if plan_only:
+        # Asking the driver for its plan takes a second and never needs the
+        # machine held awake.
+        return argv
+    return sleep_guard() + argv
+
+
+def sleep_guard() -> List[str]:
+    """The prefix that holds system sleep off for as long as the run lives.
+
+    Empty when the guard is off or `caffeinate` is not there, so this is a
+    macOS convenience rather than a dependency: on a platform without it the run
+    proceeds exactly as it did before, and the operator is told so.
+    """
+    if not PREVENT_SLEEP:
+        return []
+    caffeinate = shutil.which("caffeinate")
+    if caffeinate is None:
+        return []
+    return [caffeinate, "-is"]
 
 
 def planned_cells(results: str) -> List[str]:
@@ -736,6 +772,11 @@ def main() -> int:
         return 1
 
     print(rule("PREFLIGHT "))
+    if PREVENT_SLEEP:
+        print(
+            "  sleep         %s"
+            % ("held off for the run" if sleep_guard() else "NOT held off - caffeinate is absent")
+        )
     cleared = clear_work_root(resuming)
     if cleared is not None:
         print("  work root     cleared (%s)" % cleared)
@@ -749,16 +790,20 @@ def main() -> int:
     print(rule("STARTING "))
     print("  %s\n" % " ".join(argv))
 
+    # Its own session, so ctrl-C can stop the whole tree rather than the process
+    # at the top of it. Under the sleep guard the driver is caffeinate's child,
+    # and signalling only the direct child would kill the guard and leave the
+    # benchmark running without it.
     proc = subprocess.Popen(
         argv, cwd=REPO_ROOT, stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT, text=True, bufsize=1,
+        stderr=subprocess.STDOUT, text=True, bufsize=1, start_new_session=True,
     )
     pump = threading.Thread(target=relay, args=(proc.stdout,), daemon=True)
     pump.start()
 
     def stop(_signum, _frame):
         print("\n\nrun_and_watch: stopping the benchmark…")
-        proc.terminate()
+        _terminate(proc)
 
     signal.signal(signal.SIGINT, stop)
 

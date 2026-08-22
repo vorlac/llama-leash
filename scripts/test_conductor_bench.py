@@ -2803,6 +2803,140 @@ class PlanAndCellTests(unittest.TestCase):
             "a denied cell must leave the pass rate, symmetrically across arms",
         )
 
+    def test_a_cell_that_never_reached_the_model_is_the_harness_failing(self):
+        """[D18-empty-run] a cell that made no request at all is scored
+        `harness-error`, and one whose ledger simply cannot be read is not.
+
+        The machine slept mid-run and a cell woke to an unreachable model: a
+        78-byte transcript, no requests, nothing written, recorded `fail`
+        against its arm. Every arm's first act is to ask the model something, so
+        zero requests is not a bad attempt — it is no attempt.
+
+        The two negatives matter as much as the positive. An unreadable ledger
+        is "we cannot tell" and must not be read as "asked nothing", or every
+        cell run without a ledger becomes a harness error.
+        """
+        task = self.tasks[0]
+        ledger = self.tmp / "ledger" / "metrics.jsonl"
+        ledger.parent.mkdir(parents=True, exist_ok=True)
+
+        def run(ledger_path, lines):
+            # The router appends to the ledger WHILE the cell runs, and the
+            # window is what arrived between the two line counts. Seeding the
+            # file up front would put every line before the window and make an
+            # ordinary cell look silent.
+            if lines is None:
+                ledger.unlink(missing_ok=True)
+            else:
+                ledger.write_text("")
+
+            def runner(invocation):
+                if lines:
+                    with open(str(ledger), "a") as handle:
+                        handle.write("".join(lines))
+                return cb.CommandOutcome(0, False, None, 1)
+
+            config = dict(ROUTER_CONFIG)
+            config["metrics"] = {"ledgerPath": str(ledger_path)}
+            cell = make_cell("baseline", task.id, 1)
+            return cb.run_cell(
+                cell,
+                task,
+                cell_dir=cb.cell_dir_for(self.tmp / ("empty-%d" % len(lines or [])), cell),
+                model=SENTINEL_MODEL,
+                router_config=config,
+                base_config=BASE_OPENCODE_CONFIG,
+                per_slot_ctx=SERVED_CTX,
+                timeout_sec=5,
+                runner=runner,
+                test_runner=lambda argv, cwd, timeout_sec: cb.CommandOutcome(1, False, None, 1),
+                git_runner=lambda argv, cwd: None,
+            )
+
+        spoke = json.dumps({"status": 200, "promptTokens": 10, "completionTokens": 5}) + "\n"
+
+        silent = run(ledger, [])
+        cb.validate_result(silent)
+        self.assertEqual(silent["outcome"], "harness-error", "no request is no attempt")
+        self.assertIs(silent["passed"], False)
+
+        talked = run(ledger, [spoke, spoke])
+        cb.validate_result(talked)
+        self.assertEqual(talked["outcome"], "fail", "a cell that ran and failed is the arm's")
+
+        unknown = run(ledger, None)
+        cb.validate_result(unknown)
+        self.assertEqual(
+            unknown["outcome"],
+            "fail",
+            "an unreadable ledger is 'we cannot tell', never 'asked nothing'",
+        )
+
+    def test_a_cell_is_measured_on_the_clock_its_budget_uses(self):
+        """[D19-monotonic] elapsed is read from the monotonic clock, the one
+        `Popen.wait` counts its timeout down on.
+
+        The two clocks disagree by exactly what a cost measurement must not
+        contain. This platform's monotonic clock stops while the machine sleeps
+        and the wall clock does not, so a cell that slept through part of its run
+        was recorded at 86.8 minutes against a 60-minute budget it never tripped.
+        Measuring on the budget's own clock makes that pair impossible.
+        """
+        with mock.patch.object(cb.time, "monotonic", side_effect=[100.0, 102.5]):
+            with mock.patch.object(cb.time, "time", return_value=10_000_000.0):
+                started = cb.time.monotonic()
+                self.assertEqual(cb._elapsed_ms(started), 2500)
+
+        # A wall clock that leaps — the shape a resume from sleep has — must not
+        # reach the measurement at all.
+        with mock.patch.object(cb.time, "monotonic", side_effect=[100.0, 101.0]):
+            with mock.patch.object(cb.time, "time", side_effect=[0.0, 9_999.0]):
+                started = cb.time.monotonic()
+                self.assertEqual(cb._elapsed_ms(started), 1000)
+
+    def test_the_run_holds_sleep_off(self):
+        """[D17-no-sleep] the launcher wraps the benchmark in a sleep guard, and
+        does not wrap the one-second question it asks to print the plan.
+
+        A benchmark is a long stretch of a machine waiting on a local model,
+        which is indistinguishable from an idle machine. When this one slept
+        mid-run it broke the measurement three ways at once, and the other two
+        fixes here — the monotonic clock and the empty-run rule — are the
+        harness noticing afterwards. This is the part that stops it happening.
+        """
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import run_and_watch as rw
+
+        self.assertIs(
+            rw.PREVENT_SLEEP,
+            True,
+            "the shipped launcher holds sleep off; turning it off is a deliberate act",
+        )
+        guard = rw.sleep_guard()
+        if guard:
+            self.assertTrue(guard[0].endswith("caffeinate"), guard)
+            self.assertIn("-i", guard[1], "idle sleep must be held off")
+            self.assertIn("s", guard[1], "system sleep must be held off")
+            self.assertEqual(
+                rw.bench_argv("/tmp/results", plan_only=False)[: len(guard)],
+                guard,
+                "the run itself must be wrapped",
+            )
+        self.assertNotIn(
+            "caffeinate",
+            " ".join(rw.bench_argv("/tmp/results", plan_only=True)),
+            "asking the driver for its plan takes a second and needs no guard",
+        )
+
+        with mock.patch.object(rw, "PREVENT_SLEEP", False):
+            self.assertEqual(rw.sleep_guard(), [], "the guard is switchable off")
+            self.assertNotIn("caffeinate", " ".join(rw.bench_argv("/tmp/results", False)))
+
+        with mock.patch.object(rw.shutil, "which", return_value=None):
+            self.assertEqual(
+                rw.sleep_guard(), [], "a platform without caffeinate still runs"
+            )
+
     def test_hidden_never_visible(self):
         """[14.1-hidden-never-visible] the hidden tests never reach the model:
         seed and hidden paths are disjoint, no arm's prompt/argv/env/config
