@@ -192,13 +192,20 @@ export function decideEdit(input: EditInput): Decision {
     // leaves the caller to guess where it MAY write, and the guess costs a turn on
     // a machine where a turn is minutes: a test-writer that redirected its own test
     // output to /tmp lost the run it was verifying to this message, having done
-    // everything else its stage asks for. The one refusal in the 14.2 campaign a
-    // role recovered from productively is the decompose guard's, which lists
-    // remedies; every refusal that named only the rule produced a stall.
+    // everything else its stage asks for.
+    //
+    // The remedy has to be the one that WORKS. A first version of this message
+    // added "a path relative to that tree is always inside it", which is the exact
+    // opposite of what normalizeUnderTree does: it matches on the tree as a string
+    // PREFIX, so a relative name never starts with it and is always denied. A
+    // classifier read that advice, rewrote `cat > /tmp/…` as `cat > .classify-check.json`,
+    // and was refused a second time — the message turned one lost turn into two.
+    // Naming the tree is only useful beside the spelling the check accepts.
     return deny(
       "the path is outside this session's tree; an edit is confined to the tree the session was " +
-        `dispatched into (§3.5), and no item scope can widen that. Write it under ${sessionTree} ` +
-        "instead — scratch files included, and a path relative to that tree is always inside it",
+        `dispatched into (§3.5), and no item scope can widen that. Paths are matched as ` +
+        `absolute paths under ${sessionTree} — a bare or relative name is not resolved against ` +
+        "it, so spell the whole path (an item's fileScope still applies on top of this)",
     );
   }
 

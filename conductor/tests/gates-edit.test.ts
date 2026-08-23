@@ -1197,9 +1197,31 @@ test("[D13] an out-of-tree edit is refused with the tree it may write under", ()
       "cost a turn to discover: " + reason,
   );
   assert.ok(
-    /scratch/i.test(reason),
-    "scratch files are the case that produced this defect and the message must cover them " +
-      "explicitly, since a session reaching for /tmp is not looking for a source path: " +
-      reason,
+    /absolute/i.test(reason),
+    "the message must name the SPELLING the check accepts, not only the tree: " + reason,
+  );
+
+  // The advice has to survive being followed. A first version of this message said
+  // a relative path is "always inside" the tree, which is the opposite of what
+  // normalizeUnderTree does — it matches the tree as a string prefix. A classifier
+  // followed that advice and was denied a second time, so the message turned one
+  // lost turn into two. This asserts the remedy against the gate itself rather
+  // than against the sentence's plausibility.
+  const relative = decideEdit(editInput({ path: ".classify-check.json" }));
+  assert.equal(
+    relative.action,
+    "deny",
+    "a relative path is NOT resolved against the tree — if this ever starts passing, the " +
+      "message above is wrong again and needs rewriting with it",
+  );
+  const absolute = decideEdit(editInput({ path: p("src/a.ts") }));
+  assert.notEqual(
+    absolute.action,
+    "deny",
+    "an absolute path under the tree and inside fileScope is the spelling the message names",
+  );
+  assert.ok(
+    !/relative name is (always )?inside|relative to that tree is always inside/i.test(reason),
+    "the message must never promise a relative path works: " + reason,
   );
 });

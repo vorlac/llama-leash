@@ -227,6 +227,16 @@ selected pack is missing from the cache it contributes nothing, and an empty str
 pushed when nothing resolved at all, so `append[0]` is always a string and the state block
 is always last.
 
+That de-duplication covers **this list**, and the list is not the only channel. An agent's own
+`prompt` in `conductor/opencode-fragment.json` is a second one, and when it carried `core.md`
+the model received that pack twice per request — measured at ~1.7k tokens of duplicate on the
+13.2 smoke, by a de-duplication that was working exactly as specified on the half it could see.
+The orchestrator's prompt is now a 147-character pointer *to* the appended doctrine rather than a
+copy of it, which is what makes "never twice" true end to end;
+[`conductor/tests/fragment.test.ts`](../../conductor/tests/fragment.test.ts) pins it so a pack
+cannot drift back in. It is deliberately not empty, because an agent with no prompt receives
+opencode's own 9.7k-character default instead — larger than the pack it would have displaced.
+
 **`paramsForRole(role)`** returns the `chat.params` sampling settings — the temperature
 column above, defaulting to 0.4 for an unrecognized role. The return type allows an
 optional `topP`; the table sets temperature only. The hook writes `temperature` (and
