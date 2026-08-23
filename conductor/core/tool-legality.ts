@@ -278,6 +278,19 @@ export function undeclaredToolWhy(tool: string): string {
  * The refusal names the caller, because "refused for WHO you are" and "refused
  * for WHERE the run is" are different facts and a reader acts on them differently.
  */
+/**
+ * Every tool a caller of this kind may call, sorted. The same derivation the
+ * refusal in `callerAllowed` builds its allow-list from, exported so a caller
+ * that wants to TELL a session what it may call cannot name a different set
+ * from the one the gate will hold it to.
+ */
+export function callableBy(kind: CallerKind): string[] {
+  return Object.entries(TOOL_LEGALITY)
+    .filter(([, row]) => row.callers.includes(kind))
+    .map(([name]) => name)
+    .sort();
+}
+
 export function callerAllowed(
   tool: string,
   caller: CallerIdentity,

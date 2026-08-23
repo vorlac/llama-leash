@@ -85,6 +85,7 @@ import { legalTools } from "../core/gates-phase.ts";
 import type { GateRun, GateItem, GateQuestion } from "../core/gates-phase.ts";
 // Reuse the EXISTING registry-entry shape (chat-message.ts §3.5 orchestrator entry;
 // fanout.ts writes the sub-session entries) — a third shape is not invented here.
+import { callableBy, callerAllowed } from "../core/tool-legality.ts";
 import type { SessionRegistryEntry } from "../adapter/chat-message.ts";
 import { treePath } from "../core/types.ts";
 
@@ -683,4 +684,70 @@ test("8.2-debug-pack: an implementer on a DEBUG-posture item gets tdd.md + debug
     !orchAppend.includes(PACKS["debug.md"]),
     "a non-implementer (orchestrator) session never receives debug.md",
   );
+});
+
+// ===========================================================================
+// [D32] The block never tells a session to call a tool §3.5 refuses it for.
+//
+// legalTools answers "where does the RUN go next". A sub-session reads the same
+// block, and §3.5 lets a sub-session call only override/status/surface — so
+// naming the run's stage tool to a planner is an instruction the gate then
+// refuses. Measured in the 14.2 campaign, byte-exact:
+//
+//   #9 planner rec=conductor_decompose -> conductor_decompose REFUSED
+//      "conductor_decompose is not among the tools such a session may call"
+//
+// The planner did what the block said. D15 recorded that as the planner reaching
+// for a forbidden tool; it was the block handing it one. The cost is a full turn,
+// and on this hardware a turn is minutes.
+// ===========================================================================
+
+test("[D32] a sub-session is never told to call a tool its role may not call", () => {
+  const r = run({ state: "INTAKE" });
+  const items: ReturnType<typeof item>[] = [];
+
+  const orchBlock = buildSystemAppend(ORCH, r, items, [], PACKS, ctx()).at(-1) ?? "";
+  const planner: SessionRegistryEntry = { role: "planner" };
+  const plannerBlock = buildSystemAppend(planner, r, items, [], PACKS, ctx()).at(-1) ?? "";
+
+  // The orchestrator's block is unchanged: it MAY call the run's stage tool.
+  assert.match(
+    orchBlock,
+    /Next action: call conductor_decompose\./,
+    "the orchestrator is still told the run's next action:\n" + orchBlock,
+  );
+
+  // The planner's is not, because the gate would refuse exactly that call.
+  assert.ok(
+    !/Next action: call conductor_decompose\./.test(plannerBlock),
+    "a planner must not be told to call conductor_decompose — callerAllowed refuses it:\n" +
+      plannerBlock,
+  );
+  assert.match(
+    plannerBlock,
+    /Next action: reply with your result\./,
+    "the sub-session is told what it SHOULD do, not only what it may not:\n" + plannerBlock,
+  );
+  assert.ok(
+    plannerBlock.includes("conductor_decompose"),
+    "the run's step is still named, so the sub-session knows what its reply feeds:\n" +
+      plannerBlock,
+  );
+
+  // The allow-list it is handed is the gate's own, not a hand-written copy.
+  for (const tool of callableBy("sub-session")) {
+    assert.ok(
+      plannerBlock.includes(tool),
+      "the block names every tool the gate would allow this session: missing " + tool,
+    );
+  }
+
+  // And every tool it names, the gate agrees it may call.
+  const caller = { role: "planner" as const, itemId: undefined };
+  for (const tool of callableBy("sub-session")) {
+    assert.ok(
+      callerAllowed(tool, caller).ok,
+      "the block must never name a tool the gate refuses: " + tool,
+    );
+  }
 });

@@ -30,6 +30,8 @@ import * as path from "node:path";
 
 import { legalTools } from "../core/gates-phase.ts";
 import type { GateRun, GateItem, GateQuestion } from "../core/gates-phase.ts";
+import { callableBy, callerAllowed, callerKindOf } from "../core/tool-legality.ts";
+import type { CallerIdentity } from "../core/tool-legality.ts";
 import type { SessionRegistryEntry } from "./chat-message.ts";
 
 // ---------------------------------------------------------------------------
@@ -109,6 +111,13 @@ export interface InjectCtx {
   overridesRemaining: number;
 }
 
+
+// [D32] The tools §3.5 lets a sub-session call, derived from the same legality
+// table the refusal reads, so the block cannot name a set the gate disagrees with.
+function subSessionTools(): string {
+  return callableBy("sub-session").join(", ");
+}
+
 // Render the live state block — the LAST append entry, ≤30 lines, re-stated every
 // request. It SUMMARIZES: it names only the single recommended tool (and, for a
 // sub-session, its own active item), never the full item list, so it stays bounded
@@ -122,7 +131,28 @@ function renderStateBlock(
   ctx: InjectCtx,
 ): string {
   const verdict = legalTools(run, items, questions, ctx.repoConfigured, ctx.publishEnabled);
-  const recommended = verdict.recommended;
+  // [D32] `legalTools` answers "where does the RUN go next", which is a question
+  // about the run and not about whoever is reading the block. A sub-session is
+  // reading it too, and §3.5 lets a sub-session call only override/status/surface
+  // — so naming the run's stage tool to a planner is telling it to do something
+  // the gate will refuse it for.
+  //
+  // Measured, 14.2 epoch 9, byte-exact:
+  //
+  //   #9 planner rec=conductor_decompose -> conductor_decompose REFUSED
+  //      "conductor_decompose is not among the tools such a session may call"
+  //
+  // The planner did what the block said and was refused for it. D15 recorded that
+  // as the planner reaching for a forbidden tool; it was the block handing it one.
+  const caller: CallerIdentity = {
+    role: registryEntry.role,
+    itemId: registryEntry.itemId,
+  };
+  const runRecommended = verdict.recommended;
+  const recommended =
+    runRecommended !== null && !callerAllowed(runRecommended.tool, caller).ok
+      ? null
+      : runRecommended;
   // The recommended tool is always one of the legal tools, so the count of the
   // OTHER legal tools excludes it (and excludes nothing when nothing is recommended).
   const otherLegal = verdict.legal.size - (recommended !== null ? 1 : 0);
@@ -149,7 +179,17 @@ function renderStateBlock(
   // The single recommended next tool "with its args" — its name, and, when it is a
   // per-item stage tool, the id it targets. A terminal run recommends nothing, and we
   // name no tool for it. No OTHER legal tool is ever named here — only counted below.
-  if (recommended === null) {
+  if (recommended === null && runRecommended !== null) {
+    // [D32] The run HAS a next action and it is not this session's to take. Say
+    // what this session's next action is instead — replying is the protocol, and a
+    // sub-session told only what it may not do has to discover the rest by being
+    // refused, which costs a turn on a machine where a turn is minutes.
+    lines.push(
+      `Next action: reply with your result. The run's next step is ${runRecommended.tool}, ` +
+        "which the orchestrator takes from your reply — a sub-session may call only " +
+        `${subSessionTools()} (§3.5).`,
+    );
+  } else if (recommended === null) {
     // No hardcoded terminality claim: legalTools already computed the AUTHORITATIVE
     // reason nothing is recommended (terminal run, stalled EXECUTING wave, non-work
     // INTAKE, …). Render it verbatim so the block is never falsely "terminal".
