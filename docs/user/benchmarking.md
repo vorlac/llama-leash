@@ -345,9 +345,24 @@ quality delta attributable to enforcement alone, with the model held constant. E
 the model the manifest declares in `defaults.model` — `llamacpp/qwen3.8-27b` — so no part of
 the difference can be a model mix.
 
-This is a benchmark you run; it has no results until you do. No completed campaign is recorded
-anywhere in the repository, and the report described here is what a run produces, not a
-document sitting on disk waiting to be read.
+This is a benchmark you run; the report described here is what a run produces, not a document
+sitting on disk waiting to be read.
+
+One campaign **is** now recorded, and it is worth reading before this one:
+[`docs/build/artifacts/14.2-arm-campaign.md`](../build/artifacts/14.2-arm-campaign.md). It is a
+four-task probe rather than the full ladder, at one repetition, so it settles nothing about
+which arm is better — a single repetition cannot, and the page says so at length. What it does
+carry is the cost of getting to a number you can trust: nine defects in the *measurement* found
+and fixed across six runs, every one of them discovered by opening a cell whose result looked
+ordinary. Read it for the failure modes rather than for the scoreboard, and run
+`scripts/check_campaign.py <results dir>` against your own run to test it for the ones already
+known.
+
+Its standing results are also a fair warning about what this benchmark is capable of reporting
+about its own subject: on the hardware measured, the `conductor` arm did not complete a single
+cell at any tier, while `baseline` finished every tier in under six minutes. A benchmark whose
+first recorded campaign is unflattering to the thing it was built to justify is working
+correctly.
 
 | Arm         | What it isolates                                                              |
 | ----------- | ----------------------------------------------------------------------------- |

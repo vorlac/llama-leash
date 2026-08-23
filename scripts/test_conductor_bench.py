@@ -2997,6 +2997,93 @@ class PlanAndCellTests(unittest.TestCase):
         )
         self.assertGreater(cb.OBSERVE_TIMEOUT_SECONDS, 0)
 
+    def test_the_driver_records_what_it_did_and_what_the_router_saw(self):
+        """[D23-diagnostics] each cell leaves two artefacts beside the result:
+        the driver's own account of what it did, and the exact slice of the
+        router ledger the cell produced.
+
+        Everything else in this campaign records what the MODEL did. Nothing
+        recorded what the harness did around it — when the tree was seeded, when
+        the process was spawned and under what timeout, how it came back, when
+        the gauge ran, on what grounds a fault was declared. Each of those has
+        been the answer to a question at some point, and each time it was
+        reconstructed from file timestamps and inference.
+
+        The ledger slice matters for a different reason. The router's ledger is
+        the richest record in the system and is one global append-only file with
+        no cell boundaries and no timestamps, so the only thing that says which
+        rows belong to which cell is the line offset the harness holds while the
+        cell runs and then discards.
+        """
+        task = self.tasks[0]
+        ledger = self.tmp / "diag-ledger.jsonl"
+        ledger.write_text(json.dumps({"status": 200, "promptTokens": 1}) + "\n")
+        config = dict(ROUTER_CONFIG)
+        config["metrics"] = {"ledgerPath": str(ledger)}
+        artifacts = self.tmp / "diagnostics"
+
+        mine = json.dumps({"status": 200, "promptTokens": 7, "completionTokens": 3}) + "\n"
+
+        def runner(invocation: cb.CellInvocation) -> cb.CommandOutcome:
+            with open(str(ledger), "a") as handle:
+                handle.write(mine)
+            return cb.CommandOutcome(0, False, None, 1)
+
+        cell = make_cell("baseline", task.id, 1)
+        cb.run_cell(
+            cell,
+            task,
+            cell_dir=cb.cell_dir_for(self.tmp / "diag", cell),
+            model=SENTINEL_MODEL,
+            router_config=config,
+            base_config=BASE_OPENCODE_CONFIG,
+            per_slot_ctx=SERVED_CTX,
+            timeout_sec=5,
+            runner=runner,
+            test_runner=lambda argv, cwd, timeout_sec: cb.CommandOutcome(0, False, None, 4),
+            git_runner=lambda argv, cwd: None,
+            artifacts_dir=artifacts,
+        )
+
+        stem = cell.cell_id.replace("/", "__")
+        rows = (artifacts / ("%s.ledger.jsonl" % stem)).read_text().splitlines()
+        self.assertEqual(
+            [json.loads(line) for line in rows],
+            [{"status": 200, "promptTokens": 7, "completionTokens": 3}],
+            "the slice is this cell's rows only, not the whole ledger",
+        )
+
+        events = [
+            json.loads(line)
+            for line in (artifacts / ("%s.driver.jsonl" % stem)).read_text().splitlines()
+        ]
+        names = [entry["event"] for entry in events]
+        for expected in (
+            "cell-dir-recreated",
+            "spawn",
+            "exit",
+            "fault-check",
+            "gauge-materialized",
+            "gauge-ran",
+            "scored",
+        ):
+            self.assertIn(expected, names, expected)
+        self.assertEqual(
+            names, sorted(names, key=lambda n: names.index(n)), "events keep their order"
+        )
+        spawn = events[names.index("spawn")]
+        self.assertEqual(spawn["timeoutSec"], 5, "the timeout actually applied is recorded")
+        self.assertEqual(spawn["ledgerStartLine"], 1, "so the slice can be re-derived")
+        gauge = events[names.index("gauge-ran")]
+        self.assertEqual(gauge["command"], list(task.hidden_test_command))
+        self.assertTrue(
+            all(isinstance(entry["atMs"], int) for entry in events),
+            "offsets are monotonic milliseconds from the cell's own start (D19)",
+        )
+
+        # Off by default: the driver's ordinary output is unchanged.
+        self.assertEqual(cb.write_cell_artifacts(None, cell, cb.CellTrace(), []), [])
+
     def test_hidden_never_visible(self):
         """[14.1-hidden-never-visible] the hidden tests never reach the model:
         seed and hidden paths are disjoint, no arm's prompt/argv/env/config

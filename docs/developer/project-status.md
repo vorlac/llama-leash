@@ -42,19 +42,31 @@ The manifest holds 52 tasks. `STATE.json` carries 57 rows: the manifest tasks pl
 non-manifest ones added along the way — `5.4`, `5.4a`, `12.1-G5`, `13.1-composition-root`
 and `13.1-composition-root-CR2`.
 
-**55 of the 57 rows are `COMMITTED`. Two are `NOT_STARTED`: `13.2` and `14.2`.** Both need a
-live model, and the repo owner is holding both back to be scheduled deliberately. Nothing
-else in the build is outstanding.
+**55 of the 57 rows are `COMMITTED`. `13.2` is now `COMMITTED`; `14.2` is `IN_PROGRESS`.**
+Nothing else in the build is outstanding.
 
-| Task   | What it needs                                                                                                                                            |
-| ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `13.2` | An attended live smoke: real opencode against the smoke model, recorded to `conductor/SMOKE.md`, with retry counts and the non-behavioral path exercised. |
-| `14.2` | The POC campaign: three arms, three repetitions, committed as `docs/build/artifacts/conductor-report.md`.                                                 |
+| Task   | What it needs                                                                                                                                            | State |
+| ------ | -------------------------------------------------------------------------------------------------------------------------------------------------------- | ----- |
+| `13.2` | An attended live smoke: real opencode against the smoke model, recorded to `conductor/SMOKE.md`, with retry counts and the non-behavioral path exercised. | **DONE** — measured 2026-08-21; twenty-two defects found and fixed |
+| `14.2` | The POC campaign: three arms, three repetitions, committed as `docs/build/artifacts/conductor-report.md`.                                                 | **IN PROGRESS** — see below |
 
-Neither can be written without running it. `verify-acceptance.sh` refuses a live artifact
-under 20 lines or without a verbatim command transcript, for exactly that reason: an
-artifact a model can fabricate more cheaply than it can measure is the worst outcome
-available to this build.
+**What 14.2 has and has not produced.** Six runs have happened and are recorded in
+[`docs/build/artifacts/14.2-arm-campaign.md`](../build/artifacts/14.2-arm-campaign.md). They do
+**not** satisfy this row, and the difference matters: the row wants three repetitions across the
+full ladder, committed as `conductor-report.md`. What exists is a four-task probe at **one**
+repetition, in a different artifact, whose own §5 says a single repetition cannot separate an
+arm from a sample. The row stays open until the specified deliverable exists.
+
+What those runs did produce is the reason they were worth doing anyway: **nine defects in the
+measurement apparatus itself**, each found by opening a cell whose result looked ordinary, and
+each fixed with a test that failed first. A campaign report generated before those were found
+would have been wrong in nine ways and would have looked fine.
+
+Neither could be written without running it, and that rule is enforced rather than trusted:
+`verify-acceptance.sh` refuses a live artifact under 20 lines or without a verbatim command
+transcript, because an artifact a model can fabricate more cheaply than it can measure is the
+worst outcome available to this build. `conductor/SMOKE.md` clears that bar at 783 lines with
+its transcripts intact.
 
 The work ran on two branches. The **spine** — the TypeScript plugin, Phases 0-10 and 12-15 —
 was strictly serial. **Branch B** — the C++ router, Phase 11 — ran in parallel, because it
@@ -73,25 +85,35 @@ The gate at `HEAD`, from [`docs/build/HANDOFF.md`](../build/HANDOFF.md):
 
 | Leg               | Result        |
 | ----------------- | --------------- |
-| node `--test`     | 1811 / 1811     |
+| node `--test`     | 2041 / 2041     |
 | `tsc --noEmit`    | OK              |
 | bun smoke         | 8 pass          |
-| Python `unittest` | 86 tests        |
+| Python `unittest` | 170 tests       |
 | Schema export     | OK              |
 | `ctest` doctest   | 94 / 94 cases   |
 
 Those numbers move with every commit; re-run `bash scripts/test-conductor.sh` rather than
 quoting them. Note that CMake registers exactly one ctest test — the whole doctest binary —
-so "94" counts doctest cases, not ctest tests. The counts that hold still are structural: 86
-test files under `conductor/tests/`, nine doctrine packs, 19 exported JSON Schemas, 92
-entries in the corrections ledger.
+so "94" counts doctest cases, not ctest tests. The counts that hold still are structural: 98
+test files under `conductor/tests/`, nine doctrine packs, 19 exported JSON Schemas.
+
+**Do not run the gate while a benchmark is running.** Two legs are timing-sensitive by
+construction — `live-inject.test.ts` spawns a real `opencode` binary, and `CorpusSpeedGateTests`
+exists to time a frozen baseline and decide a ratio — and both fail under load that has nothing
+to do with the change under test. A false red costs an investigation; the dangerous direction is
+a false green, which is a gate reporting PASS without having tested anything. Gate on a quiet
+machine, before a launch.
 
 `scripts/verify-acceptance.sh` produces 21 verdicts — 15 checklist verdicts (several §11
-rows split into an `a` and a `b` half) and six hollowness detectors. Four fail, and all four
-are the same two tasks: **row 6** wants `conductor/SMOKE.md` (13.2), **row 8** wants
-`docs/build/artifacts/conductor-report.md` (14.2), **row 12** finds their two commit
-messages missing from `git log`, and **detector E** is the union of the two absent
-artifacts. Run in a fresh worktree, row 3 also fails environmentally — `.out/` is
+rows split into an `a` and a `b` half) and six hollowness detectors. The failures now trace
+to **one** task rather than two: `conductor/SMOKE.md` exists at 783 lines with a command
+transcript and both required substrings, which is everything **row 6** asks of it, so 13.2's
+artifact is in place. What remains outstanding is **row 8** — it wants
+`docs/build/artifacts/conductor-report.md` from three arms at three repetitions, and 14.2 has
+so far produced a four-task probe at one repetition in a different file — with **row 12** and
+**detector E** following from that one absence. Re-run the script rather than trusting this
+paragraph; it is the authority and this is prose about it. Run in a fresh worktree, row 3 also
+fails environmentally — `.out/` is
 gitignored, so there is no build tree there, and configuring one needs `extern/vcpkg`,
 which a worktree does not carry; in the main tree that row is green.
 
@@ -326,9 +348,9 @@ row checks, the script says whether it holds today.
 | 3   | `ctest` on `router-tests` green                                                                                                               | PASS in the main tree; fails in a worktree, which has no submodules |
 | 4   | Purity, dual-runtime and doctrine guards green                                                                                                | PASS     |
 | 5   | Scripted e2e green, all five scenarios named in the actual TAP output: greenfield red, trivial, worktree wave, non-behavioral item, and the blocked/stop-report/next-run-unpoisoned ending | PASS |
-| 6   | Live smoke recorded in `conductor/SMOKE.md`, mentioning retries and the non-behavioral path                                                    | **FAIL — 13.2 not run** |
+| 6   | Live smoke recorded in `conductor/SMOKE.md`, mentioning retries and the non-behavioral path                                                    | **PASS — measured 2026-08-21** |
 | 7   | Runner-discovery probe recorded, justifying the quarantine's out-of-repo location by measurement                                               | PASS     |
-| 8   | POC report committed as `docs/build/artifacts/conductor-report.md`: three arms, three repetitions, per-task spread                             | **FAIL — 14.2 not run** |
+| 8   | POC report committed as `docs/build/artifacts/conductor-report.md`: three arms, three repetitions, per-task spread                             | **FAIL — six probe runs recorded in `14.2-arm-campaign.md`, but at one repetition over four tasks; the specified report does not exist** |
 | 9   | `serve.py` offers `--router`/`--no-router`, and the G5 equivalence artifact records both arms reaching the same terminal state                 | PASS     |
 | 10  | `--parallel`, `admission.maxInflightPerModel` and the per-slot `--ctx-size` all derive from one number, checked over several reader counts     | PASS     |
 | 11  | `OPERATIONS.md` and `HONEST-LIMITS.md` exist, and the limits document carries as many numbered limits as plan §9 does                          | PASS     |

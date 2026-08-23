@@ -366,6 +366,13 @@ A per-job timer is armed on the global `setTimeout` **before** `session.create`,
 including the create phase. If create itself hangs, nothing else in the system would abort it and
 the whole wave would stall behind one slot.
 
+The budget is wall clock over a whole job, and a job is several requests. What fifteen minutes
+buys therefore depends on the model's generation rate, which this default knows nothing about:
+against a local 27B it is roughly two turns of the largest-output role, and the roles that need
+more are killed rather than slowed. Measured per-role figures, and what they imply for sizing
+this value and the fan-out width, are in
+[HONEST-LIMITS.md](../../conductor/docs/HONEST-LIMITS.md#the-watchdog-is-a-wall-clock-budget-and-a-local-model-spends-it-faster-than-a-role-needs).
+
 On fire the watchdog aborts the session over the SDK if an id exists yet, journals
 `subsession.abort` at `warn` with `reason: "watchdog-timeout"`, and produces an `env` error
 result. A `done` flag makes completion exactly-once across every path, so a `create` that

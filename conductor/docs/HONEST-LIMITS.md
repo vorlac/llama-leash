@@ -32,6 +32,13 @@ these corrections in hand:
   a session that calls no tool never shows one. The beacon file remains the check that does not
   depend on a tool running.
 
+**Limit 9 asks a question that has since been answered.** It says the response-observation
+dataset is empty *if* opencode streams, and leaves that to "Task 0.2". Across the 14.2 campaign's
+**550 ledger rows**, `schemaConformed` is `null` on every single one and `schemaMissing` is true
+on 170 — so the conditional has resolved in the direction the limit anticipated. The router's
+response observation has never produced a verdict on this path, and the router stands on
+scheduling and metrics alone. Read limit 9 as settled rather than open.
+
 ---
 
 1. **Gates fire inside opencode.** A human terminal, or any process outside the plugin's
@@ -301,6 +308,47 @@ And the journal records what the harness decided, never what the model was reaso
 about. That lives in opencode's own session storage, one indirection away through the
 `sessionID` on each fan-out record.
 
+### The watchdog is a wall-clock budget, and a local model spends it faster than a role needs
+
+Limit 5 treats a small model as a **quality** floor — a reviewer upholding garbage findings
+costs fix-loop rounds. Measurement says the binding constraint on this hardware is not quality
+but **rate**, and nothing anywhere in this repository said so before the 14.2 campaign measured
+it.
+
+`parallel.subSessionTimeoutMs` bounds a whole sub-session at fifteen minutes, and a sub-session
+is several requests. Per-role figures from 550 router ledger rows, one local 27B on Apple
+Silicon:
+
+| role | requests | largest completion | slowest single request | median tok/s |
+|------|---------:|-------------------:|-----------------------:|-------------:|
+| planner | 49 | 6,285 tok | 451s | 14.1 |
+| testWriter | 26 | 3,503 tok | 355s | 14.6 |
+| orchestrator | 85 | 2,644 tok | 398s | 14.0 |
+| reviewer (3 concurrent) | 6 | 2,025 tok | 597s | **5.1** |
+
+Every request completes well inside the watchdog. **The sub-session does not.** A planner
+averages about five turns, and five turns of a role whose turns reach 451 seconds cannot fit in
+900. In the 14.2 probe the planner was killed by the watchdog on four occasions across three
+runs, twice in a single cell, costing thirty of that cell's sixty minutes — including once
+immediately after a *successful* decomposition, so this is not a recovery failure dressed up as
+a timeout.
+
+Two consequences an operator should carry:
+
+- **A default sized for a cloud model is not a default.** Fifteen minutes is generous where a
+  turn is seconds and insufficient where a turn is minutes. The number is right for the
+  hardware it was chosen on, and there is nothing in the code that knows which hardware it is
+  running on.
+- **The reviewer row is contention, not deliberation.** Three critics dispatched together share
+  the served slots, so each waits behind the other two; 5.1 tok/s against every other role's ~14
+  is the queue, not the thinking. A fan-out wider than the slot count converts parallelism into
+  wall clock, and the ledger's `queueWaitMs` is where that shows up.
+
+Neither is a defect in the fan-out engine, whose watchdog does exactly what
+[scheduling-and-fanout.md](../../docs/developer/scheduling-and-fanout.md) says it does. Both are
+the honest consequence of running an orchestration designed around cheap model calls against a
+deployment where a call is minutes.
+
 ---
 
 ## How to use this list
@@ -316,6 +364,11 @@ expect:
   green suite, not a clean report — distinguishes it from a gated one.
 - **Limit 12 → one terminal per workspace.** A second plain `opencode` in the same repo
   is not merely unhelpful; it races the freshness stamps that publish depends on.
+
+- **The watchdog limit → size it against a measured turn, not a guess.** On a deployment where a
+  turn runs into minutes, the fifteen-minute sub-session budget is roughly two turns of the
+  largest-output role, and the roles that exceed it are killed rather than slowed. Measure the
+  rate before trusting the default, and keep any fan-out at or below the served slot count.
 
 The remaining limits are bounds on interpretation: they say how much a green run is
 worth, and the answer is "exactly as much as the target repo's own tests are worth"

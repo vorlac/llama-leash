@@ -104,6 +104,7 @@ DOCTRINE_DIR = REPO_ROOT / "conductor" / "doctrine"
 # short because nothing downstream waits on it.
 OBSERVE_TOOL = REPO_ROOT / "conductor" / "tools" / "observe.ts"
 OBSERVE_TIMEOUT_SECONDS = 120
+
 FRAGMENT_PATH = REPO_ROOT / "conductor" / "opencode-fragment.json"
 ROUTER_CONFIG_PATH = REPO_ROOT / conductor_wiring.ROUTER_CONFIG_RELPATH
 
@@ -393,6 +394,20 @@ DEFAULT_BASE_CONFIG = {
 
 class BenchError(Exception):
     """A benchmark input or invariant the driver refuses to proceed past."""
+
+# The level every cell's plugin journals at. `debug` is the campaign default and
+# is what the question "what did each arm REACH" needs. `trace` is the level
+# above it and exists for diagnosis rather than measurement: it is the setting
+# to reach for when a run does something inexplicable and the journal is silent
+# about why. Set through CONDUCTOR_CELL_LOG_LEVEL so turning it up is one
+# environment variable rather than an edit, and so the value used is recorded in
+# each cell's config where a later reader can see what was gathered.
+CELL_LOG_LEVEL = os.environ.get("CONDUCTOR_CELL_LOG_LEVEL", "debug")
+if CELL_LOG_LEVEL not in ("error", "warn", "info", "debug", "trace"):
+    raise BenchError(
+        "CONDUCTOR_CELL_LOG_LEVEL is %r, which is outside conductor/core/types.ts "
+        "LOG_LEVELS (error, warn, info, debug, trace)" % CELL_LOG_LEVEL
+    )
 
 
 def model_slug(model: str) -> str:
@@ -1860,7 +1875,7 @@ def build_conductor_cell_config(task: Task) -> Dict[str, Any]:
         # each arm REACHED and whether reaching it correlates with passing, so a
         # cell gathered at info holds the denies and the network allows and
         # nothing behind that question.
-        "logging": {"level": "debug", "components": {}},
+        "logging": {"level": CELL_LOG_LEVEL, "components": {}},
     }
 
 
@@ -2052,6 +2067,7 @@ def run_cell(
     runner: Optional[Callable[[CellInvocation], CommandOutcome]] = None,
     test_runner: Optional[Callable[[Sequence[str], Any, float], CommandOutcome]] = None,
     git_runner: Optional[Callable[[Sequence[str], Any], None]] = None,
+    artifacts_dir: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """Execute one cell end to end and return its pinned result record.
 
@@ -2066,10 +2082,12 @@ def run_cell(
     # is the previous run's followed by its own, and starts against a home that
     # already knows things. Both are silent: nothing errors, the numbers look
     # ordinary, and the evidence is a splice of two runs.
+    trace = CellTrace()
     directory = Path(cell_dir)
     if directory.exists():
         shutil.rmtree(str(directory))
     directory.mkdir(parents=True, exist_ok=True)
+    trace.mark("cell-dir-recreated", path=str(directory))
 
     # Every arm is seeded with the SAME file set, conductor's config included.
     # The alternative - writing it only for the conductor arm - gives that arm a
@@ -2077,7 +2095,11 @@ def run_cell(
     # trees the arms are compared on are not the same tree. Writing it after the
     # seed commit instead is worse still: an uncommitted file leaves the tree
     # dirty, which conductor's own `preexistingDirty: refuse` would then refuse.
-    # The arms with no plugin never read the file.
+    # The arms with no plugin never ACT on the file. They do read it: the
+    # doctrine arm opened it unprompted on a T0 task and carried it in its own
+    # working inventory, which is a read and a slice of context spent on
+    # machinery it does not have. Hiding it from them would cost the identical
+    # tree this comment exists to defend, so the read is accepted and named.
     extra = {
         ".conductor/config.json": json.dumps(build_conductor_cell_config(task), indent=2)
         + "\n"
@@ -2122,8 +2144,15 @@ def run_cell(
         timeout_sec=timeout_sec,
     )
     started_iso = utc_now_iso()
+    trace.mark("spawn", arm=cell.arm, timeoutSec=timeout_sec, ledgerStartLine=ledger_before)
     run_outcome = (default_cell_invocation_runner if runner is None else runner)(invocation)
     wall_clock_ms = run_outcome.wall_clock_ms
+    trace.mark(
+        "exit",
+        exitCode=run_outcome.exit_code,
+        timedOut=run_outcome.timed_out,
+        spawnError=run_outcome.spawn_error,
+    )
 
     # The tree is measured however the cell ended, a timeout included. An arm
     # that ran out of wall clock can be holding a correct solution, and one that
@@ -2140,6 +2169,7 @@ def run_cell(
         fault = "a tool call was denied on a path inside the cell's own tree"
     elif window["requests"] == EMPTY_RUN_REQUESTS:
         fault = "the cell reached the model zero times"
+    trace.mark("fault-check", requests=window["requests"], fault=fault)
     if run_outcome.spawn_error:
         # Nothing ran, so there is no work to measure - only the seed.
         score = score_cell(
@@ -2147,8 +2177,16 @@ def run_cell(
         )
     else:
         materialize_files(work, task.hidden_files)
+        trace.mark("gauge-materialized", files=sorted(task.hidden_files))
         tester = default_test_runner if test_runner is None else test_runner
         test_outcome = tester(list(task.hidden_test_command), work, timeout_sec)
+        trace.mark(
+            "gauge-ran",
+            command=list(task.hidden_test_command),
+            exitCode=test_outcome.exit_code,
+            timedOut=test_outcome.timed_out,
+            ms=test_outcome.wall_clock_ms,
+        )
         gauge = {
             "ran": True,
             "passed": (
@@ -2204,6 +2242,10 @@ def run_cell(
         "gauge": gauge,
     }
     validate_result(result)
+    trace.mark("scored", outcome=result["outcome"], gauge=result["gauge"])
+    # Written here rather than returned, so the result record keeps exactly the
+    # pinned field set and no caller has to remember to strip anything.
+    write_cell_artifacts(artifacts_dir, cell, trace, ledger_slice(ledger, ledger_before))
     return result
 
 
@@ -2310,6 +2352,28 @@ def ledger_line_count(ledger_path: Any) -> int:
         return 0
 
 
+def ledger_slice(ledger_path: Any, start_line: int) -> List[str]:
+    """The ledger lines this cell added, verbatim.
+
+    The router's ledger is the richest record in the system — per request it
+    carries the queue wait, the upstream duration, the token counts and
+    llama.cpp's own timings down to prompt-per-token milliseconds and KV cache
+    hits. It is also ONE global append-only file with no cell boundaries and no
+    timestamps, so the only way to say which rows belong to which cell is the
+    line offset the harness took before the cell started.
+
+    That offset is known for exactly as long as the cell runs and is then
+    discarded, having been reduced to a sum. Keeping the rows themselves costs a
+    few kilobytes and turns the campaign's least joinable stream into a
+    per-cell artefact.
+    """
+    try:
+        with open(str(ledger_path), "r") as handle:
+            return handle.readlines()[start_line:]
+    except OSError:
+        return []
+
+
 def summarize_ledger_window(ledger_path: Any, start_line: int) -> Dict[str, Any]:
     """Token totals and infrastructure failures over one cell's ledger window.
 
@@ -2379,6 +2443,64 @@ def summarize_ledger_window(ledger_path: Any, start_line: int) -> Dict[str, Any]
 # ---------------------------------------------------------------------------
 # Process metrics
 # ---------------------------------------------------------------------------
+
+
+def write_cell_artifacts(
+    artifacts_dir: Optional[Any],
+    cell: "Cell",
+    trace: "CellTrace",
+    ledger_rows: Sequence[str],
+) -> List[str]:
+    """The per-cell diagnostic pair: what the harness did, and what the router saw.
+
+    Off unless a directory is given, so the driver's normal output is unchanged
+    and a run that wants the detail opts into it. Never fatal: a diagnostic that
+    can fail the cell it describes is worse than no diagnostic.
+    """
+    written: List[str] = []
+    if artifacts_dir is None:
+        return written
+    stem = cell.cell_id.replace("/", "__")
+    try:
+        destination = Path(artifacts_dir)
+        destination.mkdir(parents=True, exist_ok=True)
+        for suffix, lines in (("driver.jsonl", trace.lines()), ("ledger.jsonl", list(ledger_rows))):
+            target = destination / ("%s.%s" % (stem, suffix))
+            target.write_text("".join(lines))
+            written.append(str(target))
+    except OSError:
+        return written
+    return written
+
+
+class CellTrace:
+    """The driver's own account of what it did to one cell, and when.
+
+    Everything else in this campaign records what the MODEL did. Nothing
+    recorded what the harness did around it: when the tree was seeded, when the
+    process was spawned and with what timeout, when it came back and how, when
+    the hidden files were materialised, when the gauge ran, and on what grounds
+    a fault was declared. Every one of those has been the answer to a question at
+    some point in this campaign, and every time it was reconstructed from file
+    timestamps and inference.
+
+    Times are monotonic offsets from the cell's own start, for the reason D19
+    gives: a wall clock on a machine that sleeps measures something other than
+    the work.
+    """
+
+    def __init__(self) -> None:
+        self.started = time.monotonic()
+        self.events: List[Dict[str, Any]] = []
+
+    def mark(self, event: str, **data: Any) -> None:
+        self.events.append(
+            {"atMs": int(round((time.monotonic() - self.started) * 1000.0)),
+             "event": event, **data}
+        )
+
+    def lines(self) -> List[str]:
+        return [json.dumps(entry) + "\n" for entry in self.events]
 
 
 def capture_observation(results_dir: Any, cell: "Cell", work_dir: Any) -> List[str]:
@@ -3726,6 +3848,7 @@ def make_cell_runner(
     router_config: Dict[str, Any],
     base_config: Dict[str, Any],
     per_slot_ctx: int,
+    artifacts_dir: Optional[Any] = None,
 ) -> Callable[[Cell, Task, Any], Dict[str, Any]]:
     """The live cell runner: one closure over the run-wide settings.
 
@@ -3744,6 +3867,7 @@ def make_cell_runner(
             base_config=base_config,
             timeout_sec=task.run_timeout_sec,
             per_slot_ctx=per_slot_ctx,
+            artifacts_dir=artifacts_dir,
         )
 
     return runner
@@ -3812,6 +3936,9 @@ def run_benchmark(
                     if per_slot_ctx is not None
                     else served_per_slot_context(live_router_config, models[0])
                 ),
+                # Beside the results, because the work root is deleted at the
+                # start of the next run and these describe THIS one.
+                artifacts_dir=results_path / "diagnostics",
             )
         for cell in cells:
             recorded = result_path(results_path, cell)

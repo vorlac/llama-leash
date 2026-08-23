@@ -46,9 +46,16 @@ test owns.
 
 ## Read it as a specification, not a recording
 
-Every claim on the page describes what the code at this revision specifies. Task 13.2 — the
-live smoke — has not been run, so **no path on the map has been observed end to end against
-a live model**. Nodes carrying a `caveat` chip are the places the code is known to depart
+Every claim on the page describes what the code at this revision specifies, and a specification
+is not an observation. Task 13.2 — the live smoke — **has** been run since this page was
+written ([`conductor/SMOKE.md`](../conductor/SMOKE.md), measured 2026-08-21), and the 14.2 arm
+campaign has run since that
+([`docs/build/artifacts/14.2-arm-campaign.md`](build/artifacts/14.2-arm-campaign.md)). Both
+found defects in numbers this page cannot anticipate — twenty-two in the smoke, nine in the
+campaign's own measurement apparatus — so read the map as what the code *intends* and those two
+records as what it *did*. Where they disagree, the records win.
+
+Nodes carrying a `caveat` chip are the places the code is known to depart
 from the obvious reading; read those first. They include the gaps worth knowing before a
 live test: the git gate does not see through most command wrappers, a gate crash on an
 unguarded call fails open, `fetchMetricsSummary` has no production caller so every report

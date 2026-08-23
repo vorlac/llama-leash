@@ -85,6 +85,22 @@ emits the slot count and the total together, from the one number you gave it, an
 the total exactly once — llama-server honours the LAST such argument it is handed, so a
 second one would silently discard an intent. At one slot there is nothing to divide.
 
+**What the 32768 default was sized for, and what it was not.** The figure is justified above
+by the orchestrator's first request being 11,441 tokens — that is, it was sized so the first
+request is *admitted*. That is a weaker property than it reads, and the difference costs a run.
+opencode compacts a session at `context` minus the output reserve, so a 32,768-token slot with
+its quarter-sized `output` leaves **24,576** to work in, and a session carrying a large static
+prompt spends most of that before it reads the task: the 14.2 campaign's doctrine arm carries
+~13.8k tokens of packs on every request, leaving about 10k of working room. It compacted three
+times on a four-line function, resumed twice onto the same instruction, and ran out its wall
+clock holding a correct answer. Served at 65,536 per slot the same cell compacts zero times, in
+four consecutive runs.
+
+So: **a slot that admits the first request is not a slot that sustains a session.** Size
+`--ctx` against the largest static prompt an arm carries plus room to work in, not against the
+first request — and remember that raising it multiplies by the slot count, so the honest lever
+is often fewer slots at a larger window rather than more total KV cache.
+
 **With the router versus without.** The conductor code path is **identical** either way:
 the same plugin, the same gates, the same handlers, the same sub-session dispatch. The
 only thing `--no-router` changes is the base URL the client resolves — straight to

@@ -323,12 +323,23 @@ before trusting it:
 Conductor is under active construction against
 [the plan](../plans/2026-08-07-conductor-harness-plan.md), which is the design authority.
 
-Two things this page describes have not been exercised end to end. The **live smoke** — a
-real opencode session driving a real run against a real served model — has not been run, so
-every claim here rests on the test suite rather than on an observed session. And the
-**proof-of-concept benchmark campaign**, the measurement that would say whether the process
-buys the quality it costs, has not been run either. Nothing on this page should be read as a
-measured result.
+Both of the things that would exercise this page end to end have since been run, and neither
+was kind to it.
+
+The **live smoke** — a real opencode session driving a real run against a real served model —
+ran on 2026-08-21 ([`conductor/SMOKE.md`](../../conductor/SMOKE.md)). It found twenty-two
+defects, including one that made every fan-out sub-session run on the wrong doctrine and one
+that made a whole FSM stage unreachable. The **benchmark campaign**, the measurement that would
+say whether the process buys the quality it costs, has run as a four-task probe
+([`docs/build/artifacts/14.2-arm-campaign.md`](../build/artifacts/14.2-arm-campaign.md)). Its
+standing result on the hardware measured: the `conductor` arm completed no cell at any tier,
+while plain opencode finished every tier in under six minutes.
+
+So the correct reading of this page has changed rather than relaxed. Its claims about what the
+code *specifies* rest on the test suite and are in good standing. Its implicit promise — that
+the specification adds up to a process worth its cost — is the open question, one campaign has
+now been pointed at it, and the early answer is not yet a yes. Nothing here should be read as a
+measured result; the two records above are where measured results live.
 
 For what is committed and green, what is next, and what is deliberately deferred, see
 [project status](../developer/project-status.md) — it is the single authoritative page for
