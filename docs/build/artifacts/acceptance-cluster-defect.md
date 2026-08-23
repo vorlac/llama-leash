@@ -414,6 +414,38 @@ of any one file, so nothing exists to canonicalize `parser.ts` onto under `fileS
 `n`, and two distinct non-ASCII identifiers sharing a first ASCII letter collapse to that
 letter. Untouched by this repair and worth its own row.
 
+**Preservation phrased by restating the value.** `PRESERVATION_CLAIMS` matches a sameness
+verb followed by a closed set of sameness WORDS — `unchanged`, `unmodified`, `untouched`,
+`unaffected`, `intact`, `the same`, `as before`, `byte-for-byte`. A criterion that preserves by
+restating what is preserved matches none of them:
+
+```
+The export remains export function slugify(input: string): string   ->  ["export"]
+```
+
+The verb is in the list; the object is a signature rather than a sameness word. Observed live on
+the 14.2 arm campaign's `conductor/slugify-ts` cell, where four criteria folded onto the declared
+file and this fifth one carried the item to two clusters and escalated a four-line string
+function out of the trivial route. It reproduces off a bare `node` import with no model:
+
+```
+acceptanceClusters([
+  "slugify('Hello, World!') returns 'hello-world'",
+  "slugify('  --Foo__Bar--  ') returns 'foo-bar'",
+  "slugify('a1 b2') returns 'a1-b2'",
+  "slugify('Hello') returns 'hello' and the existing test in tests/visible.test.ts keeps passing",
+  "The export remains export function slugify(input: string): string",
+], { fileScope: ["src/slugify.ts"], testScope: ["tests/visible.test.ts"] })
+  -> ["src/slugify.ts", "export"]
+```
+
+Subject-first phrasing folds it — `slugify keeps its export name and signature` yields
+`["src/slugify.ts"]` — so the doctrine remedy covers it as it covers the verb-leading row above.
+Whether the pattern should also cover it is a judgement about how far the abstention grammar
+should widen, which §7's learnability note argues is not free; it is recorded here rather than
+changed, because the two-things rate corpus is the instrument that decides it and this
+observation arrived without one.
+
 **The sibling acceptance row is not on this list, because it is repaired alongside.**
 `vagueAcceptance` — the only other row in the §3.2 table that reads free text — carried the
 identical identifier-versus-English confusion: `refactor(ast) preserves the token count`
@@ -425,6 +457,11 @@ trigger for the same wedge.
 ---
 
 ## 9. Verified state
+
+Point-in-time, as of the repair this document records. The counts below are what the gate
+reported **then**; they are a receipt for this work rather than a claim about `HEAD`, and they
+move with every commit. Re-run the two commands rather than reading these as current — the
+campaign that added the residual row in §8 was gating at 2043 node and 172 python tests.
 
 ### Gate and scan
 
