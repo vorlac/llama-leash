@@ -376,7 +376,7 @@ describe("live injection through a real opencode (GAP-003)", { skip: SKIP }, () 
     );
     assert.match(
       block as string,
-      /Recommended next tool: conductor_classify/,
+      /Next action: call conductor_classify./,
       "a fresh INTAKE run has not been classified — adapter/chat-message.ts's classification is a " +
         "PLACEHOLDER and run.classified is the receipt — so the gate's own legality verdict " +
         "recommends conductor_classify:\n" + String(block),

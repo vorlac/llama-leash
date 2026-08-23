@@ -188,9 +188,17 @@ export function decideEdit(input: EditInput): Decision {
   //    to reject, because a wildcard-headed scope would have accepted it.
   const normalized = normalizeUnderTree(path, sessionTree);
   if (normalized === null) {
+    // The remedy is named, not only the rule. A refusal that stops at the rule
+    // leaves the caller to guess where it MAY write, and the guess costs a turn on
+    // a machine where a turn is minutes: a test-writer that redirected its own test
+    // output to /tmp lost the run it was verifying to this message, having done
+    // everything else its stage asks for. The one refusal in the 14.2 campaign a
+    // role recovered from productively is the decompose guard's, which lists
+    // remedies; every refusal that named only the rule produced a stall.
     return deny(
       "the path is outside this session's tree; an edit is confined to the tree the session was " +
-        "dispatched into (§3.5), and no item scope can widen that",
+        `dispatched into (§3.5), and no item scope can widen that. Write it under ${sessionTree} ` +
+        "instead — scratch files included, and a path relative to that tree is always inside it",
     );
   }
 

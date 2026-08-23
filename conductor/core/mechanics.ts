@@ -285,8 +285,12 @@ export function renderMechanics(pack: string): string {
   }
   lines.push(
     "",
-    "The harness re-derives which of these is legal on every request and names the one it " +
-      "recommends. A call out of order is refused, not negotiated.",
+    // [D26] The block's own wording. It used to say "names the one it recommends",
+    // which described a line reading "Recommended next tool: X" — advisory phrasing
+    // the block no longer uses. Doctrine that quotes the block has to quote what the
+    // block says, or the reader is bridging a gap on every request.
+    "The harness re-derives which of these is legal on every request and states it as the " +
+      "live block's `Next action:` line. A call out of order is refused, not negotiated.",
   );
   // GAP-041: the §2.10 vet checklist is derived too, from ./vet-criteria.ts — the
   // same list SCHEMAS.TestVet validates a critic receipt against and both vet

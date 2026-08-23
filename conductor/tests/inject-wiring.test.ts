@@ -514,11 +514,27 @@ test("[inject-wiring-system-transform] the transform hook appends the role's pac
     "the LIVE STATE BLOCK is the last append entry (§6.4), re-stated every request; got: " + last.slice(0, 200),
   );
   assert.ok(
-    last.includes("Recommended next tool: conductor_classify"),
+    last.includes("Next action: call conductor_classify."),
     "the block must name the ONE recommended next tool from the gate's own legality verdict — a " +
       "freshly created run has not been classified (adapter/chat-message.ts writes a PLACEHOLDER " +
       "classification, and run.classified is the receipt that says the classifier has spoken), so " +
       "the recommendation is conductor_classify. Got:\n" + last,
+  );
+
+  // [D26] A block that names an action must not, in the same breath, name a way to
+  // go looking for something else. The line after the action used to read "call
+  // conductor_status to enumerate them", pointing at a read-only tool that advances
+  // nothing — and conductor_status is the orchestrator's most common wrong call in
+  // the 14.2 per-turn capture. The COUNT of other legal tools is honest and stays;
+  // the instruction to go and get them does not.
+  assert.ok(
+    !last.includes("call conductor_status"),
+    "with a next action named, the block must not also instruct the session to call " +
+      "conductor_status: it advances nothing and competes with the action. Got:\n" + last,
+  );
+  assert.ok(
+    /Other legal tools available now: \d+\./.test(last),
+    "the count of other legal tools is honest and stays — only the invitation goes. Got:\n" + last,
   );
   assert.ok(
     last.split("\n").length <= 30,
@@ -682,7 +698,7 @@ test("[inject-wiring-receipt-recommendation] the receipt records the single next
   const block = output.system[output.system.length - 1];
   assert.match(
     block,
-    /Recommended next tool: conductor_classify/,
+    /Next action: call conductor_classify./,
     "and the recorded name is the one the model was actually told, from the same derivation — a " +
       "receipt that disagreed with the block would be worse than none",
   );
@@ -865,7 +881,7 @@ test("[inject-wiring-publish-freshness] a repo created mid-process changes the v
 
   const before = await deliveredStateBlock(hooks, sessionID);
   assert.ok(
-    before.includes("Recommended next tool: conductor_report"),
+    before.includes("Next action: call conductor_report."),
     "premise: with no repo, §3.9 makes REVIEWED terminal and the run closes via conductor_report; " +
       "got:\n" + before,
   );
@@ -876,7 +892,7 @@ test("[inject-wiring-publish-freshness] a repo created mid-process changes the v
 
   const after = await deliveredStateBlock(hooks, sessionID);
   assert.ok(
-    after.includes("Recommended next tool: conductor_publish on I1"),
+    after.includes("Next action: call conductor_publish on I1."),
     "the state block must re-derive §3.9 publish availability per request, exactly as the stage gate " +
       "does (adapter/tools.ts calls isRepo(store.root) fresh on every stage call). A process-lifetime " +
       "memo makes the block report publishEnabled:false forever after a setup that initialized the " +

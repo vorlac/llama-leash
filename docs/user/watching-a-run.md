@@ -35,7 +35,7 @@ preserved journal you are reading after the fact.
 While a bench cell is running, in a second terminal at the repository root:
 
 ```bash
-RUN=$(find "${TMPDIR:-/tmp}/llama-leash-conductor-work" -type d -name 'r-*' -path '*/.conductor/runs/*' -prune \
+RUN=$(find "$HOME/.llama-leash-work" -type d -name 'r-*' -path '*/.conductor/runs/*' -prune \
       | xargs ls -dt | head -1)
 
 node conductor/tools/observe.ts "$RUN" --follow
@@ -48,9 +48,20 @@ does not notice either way.
 
 A cell's run directory is
 `<work-root>/<model>/<capability>/<arm>/<task>/r<rep>/repo/.conductor/runs/<runId>`,
-and the work root defaults to `${TMPDIR}/llama-leash-conductor-work`
-(`scripts/conductor_bench.py --work-root` overrides it). If you already know the
-run directory, pass it directly.
+and `run_and_watch.py` sets the work root to **`~/.llama-leash-work`**
+(`scripts/conductor_bench.py --work-root` overrides it; the driver's own default,
+used when nothing passes the flag, is still `${TMPDIR}/llama-leash-conductor-work`).
+If you already know the run directory, pass it directly.
+
+It is kept off `$TMPDIR` deliberately. Building a work tree under macOS's long,
+randomly-named, symlinked temp path, opencode composed a permission pattern from a
+copy of that path with eight characters missing out of the random component,
+decided the result was outside the project, and refused an arm a file in its own
+repository — see [HONEST-LIMITS.md](../../conductor/docs/HONEST-LIMITS.md).
+
+**The work root is cleared at the start of every run.** Whatever you want to read
+afterwards has to be copied out, or read from the artifacts below, which are
+written beside the results instead.
 
 ### The flags
 
@@ -282,8 +293,53 @@ on these records cannot show cheerful allows at the moment a run is dying.
 
 ---
 
+## What a finished run leaves behind
+
+The console above exists only while somebody is watching it. Three artifacts survive
+the run, and they are written **beside the results** rather than in the work tree,
+because the work tree is deleted when the next run starts.
+
+| Path | What it holds |
+|------|---------------|
+| `<results>/diagnostics/<cellId>.driver.jsonl` | What the harness did to that cell and when: tree re-created, spawn with the timeout that actually applied, exit, fault decision, gauge materialised, gauge run, scored. Offsets are monotonic milliseconds from the cell's own start. |
+| `<results>/diagnostics/<cellId>.ledger.jsonl` | Exactly the router-ledger rows that cell produced — queue wait, upstream duration, tokens and llama.cpp's own timings, per request. The ledger itself is one global append-only file with no cell boundaries, so this slice is the only thing that says which rows are whose. |
+| `<results>/observed/<cellId>.turns.txt` | The per-turn table for a conductor cell: recommended tool against tool actually called, and `gen` against `up`. Conductor arm only — the other two write no journal. |
+
+The last one is the reason to bother. The journal records the tool calls that
+**succeeded**; it does not record a turn that called nothing, or called something
+other than the recommended tool, so a stretch of turns getting nowhere appears in
+the journal as a gap with no events in it. The turn table shows them, with two
+clocks: `gen` is the model generating and `up` is the whole upstream call, and the
+difference between them is time queued behind another slot.
+
+To follow a cell's transcript live, and archive each one as it finishes:
+
+```bash
+/usr/bin/python3 scripts/watch_transcript.py
+```
+
+It follows whichever cell is running, switches when the driver moves on, and copies
+each completed transcript to `<results>/transcripts/`.
+
+To check a finished run for defects this project has already fixed:
+
+```bash
+/usr/bin/python3 scripts/check_campaign.py .data/benchmark/watch/<run>
+```
+
+It reads the results and looks for the signature each known defect leaves — a
+timeout whose tree was never scored, a cell that reached the model zero times, a
+wall clock that outlived the budget meant to bind it, a transcript holding two
+runs. It prints every check it could **not** run, because a checker that quietly
+skips is indistinguishable from one that found nothing.
+
+---
+
 ## Related
 
 - [observability.md](observability.md) — the ledger, the metrics and what the router records.
+- [`docs/build/artifacts/14.2-arm-campaign.md`](../build/artifacts/14.2-arm-campaign.md) —
+  what reading these records has actually turned up, and the diagnostic traps worth
+  knowing before you read your own.
 - `conductor/docs/OPERATIONS.md` — the post-mortem reading order, and `replay.ts`
   for the full record-by-record timeline of a finished run.

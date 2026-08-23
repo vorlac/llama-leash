@@ -243,13 +243,38 @@ function stageCount(stage: ReadStage, config: ScheduleConfig): number {
   }
 }
 
+// The vet fan-out on a run both the classifier AND the skeptic called trivial.
+// Three independent critics exist to catch a weak test on work that matters; a run
+// two judgements have already called small has bought the right to one.
+//
+// This is the campaign's most expensive stage measured against its least valuable
+// use. On a T0 cell the vet wave cost 9.7 minutes of a 27.3-minute run-up to the
+// implementer — and the reviewers are the one role that does not run at the
+// machine's rate: three concurrent critics against three served slots measured
+// 5.1 tok/s against every other role's ~14, because each waits behind the other
+// two. One critic runs at full rate, so the saving is not two thirds of 9.7 but
+// closer to all but two and a half minutes of it. The cell that produced those
+// numbers dispatched its implementer at minute 27.3 of 30.
+const TRIVIAL_VET_CRITICS = 1;
+
 /**
  * The per-stage read fan-out (§4.3): the stage's configured reader count clamped
  * to the parallel.maxReaders ceiling — min(stageCount, maxReaders). "Up to
  * maxReaders" readers dispatch for that stage.
+ *
+ * `classification` narrows the vet stage only. Passing it is optional and its
+ * absence changes nothing, so every other caller and every other stage reads
+ * exactly as before.
  */
-export function readFanout(stage: ReadStage, config: ScheduleConfig): number {
-  const configured = stageCount(stage, config);
+export function readFanout(
+  stage: ReadStage,
+  config: ScheduleConfig,
+  classification?: "work" | "trivial" | "question",
+): number {
+  const configured =
+    stage === "vet" && classification === "trivial"
+      ? Math.min(stageCount(stage, config), TRIVIAL_VET_CRITICS)
+      : stageCount(stage, config);
   const ceiling = config.parallel.maxReaders;
   return configured < ceiling ? configured : ceiling;
 }

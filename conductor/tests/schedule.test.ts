@@ -482,3 +482,51 @@ test("[3.3-api] readFanout caps every stage at parallel.maxReaders", () => {
     "a ceiling of 1 forces serial reads",
   );
 });
+
+// ===========================================================================
+// [D27] A trivial run vets its test with ONE critic.
+//
+// Three independent critics exist to catch a weak test on work that matters. A
+// run the classifier AND the skeptic both called trivial has spent two
+// judgements saying this is small, and the vet wave is the most expensive stage
+// in the pipeline measured against its least valuable use.
+//
+// From the 14.2 campaign's T0 cell: 9.7 minutes of a 27.3-minute run-up to the
+// implementer went to three critics judging a six-case test for a four-line
+// function. The reviewers are also the one role that does not run at the
+// machine's rate — three concurrent critics against three served slots measured
+// 5.1 tok/s against every other role's ~14, because each waits behind the other
+// two — so one critic is not a third of the cost, it is closer to a quarter.
+// That cell dispatched its implementer at minute 27.3 of 30.
+//
+// Narrowing is deliberately one-way: it can only ever LOWER the configured
+// count, never raise it, so an operator who configures one critic still gets one
+// and an operator who configures three still gets three on work.
+// ===========================================================================
+
+test("[D27] the vet fan-out narrows to one critic on a trivial run, and nothing else moves", () => {
+  const config = cfg({
+    maxReaders: 6,
+    planReviewers: 4,
+    itemReviewers: 6,
+    vetCritics: 3,
+    skepticsPerFinding: 2,
+  });
+
+  assert.equal(readFanout("vet", config), 3, "with no classification the configured count stands");
+  assert.equal(readFanout("vet", config, "work"), 3, "work vets with every configured critic");
+  assert.equal(readFanout("vet", config, "question"), 3, "only trivial narrows");
+  assert.equal(readFanout("vet", config, "trivial"), 1, "a trivial run vets with one critic");
+
+  // The narrowing is scoped to the vet stage. A trivial run still reviews its
+  // plan and its items with the configured fan-out, because those stages are not
+  // what the measurement indicted.
+  assert.equal(readFanout("planReview", config, "trivial"), 4, "planReview is untouched");
+  assert.equal(readFanout("itemReview", config, "trivial"), 6, "itemReview is untouched");
+  assert.equal(readFanout("skeptics", config, "trivial"), 2, "skeptics are untouched");
+
+  // One-way: an operator who already configured fewer keeps fewer.
+  const lean = cfg({ maxReaders: 6, planReviewers: 1, itemReviewers: 1, vetCritics: 1, skepticsPerFinding: 1 });
+  assert.equal(readFanout("vet", lean, "trivial"), 1, "one stays one");
+  assert.equal(readFanout("vet", lean, "work"), 1, "and is never raised to the trivial floor");
+});

@@ -83,7 +83,7 @@ Item stages, in FSM order: conductor_submit_test (testWriter) -> conductor_vet_t
 A stage's parenthesised roles are the sub-sessions it dispatches: making the call is how that work gets authored, so never write the artifact yourself. A bare stage dispatches none.
 A dispatched sub-session may call only: conductor_override, conductor_status, conductor_surface. Every other conductor tool belongs to the orchestrator, and a call from a dispatched session is refused by name — a session cannot answer its own question, defer its own item, close its own run or widen its own scope.
 
-The harness re-derives which of these is legal on every request and names the one it recommends. A call out of order is refused, not negotiated.
+The harness re-derives which of these is legal on every request and states it as the live block's `Next action:` line. A call out of order is refused, not negotiated.
 
 ## When you are stuck
 

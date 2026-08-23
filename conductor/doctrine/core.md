@@ -10,10 +10,11 @@ its work needs.
 "The legal next action" is not a judgement call: a run walks a fixed sequence of
 stages, and the generated mechanics section below names it in FSM order — the run
 stages, then the item pipeline each work item walks. Read it as your playbook, but
-at every position the harness re-derives which action is legal and names the one
-it recommends. **You do not choose the next tool from memory** — you take the
-recommended one; a call out of order is refused, not negotiated. When no stage
-tool is recommended, the run is waiting on a meta-tool decision (an answer, a
+at every position the harness re-derives which action is legal and states it as
+the live block's `Next action:` line.
+**You do not choose the next tool from memory** — you call the one named there;
+a call out of order is refused, not negotiated. When the block reads
+`Next action: none`, the run is waiting on a meta-tool decision (an answer, a
 deferral, a surfaced question) or it is done.
 
 ## Records over assertions
@@ -109,7 +110,7 @@ A stage's parenthesised roles are the sub-sessions it dispatches: making the cal
 Meta tools, outside the stage order: conductor_answer, conductor_decide, conductor_defer, conductor_inline_claim, conductor_override, conductor_queue_amend, conductor_setup, conductor_status, conductor_surface.
 A dispatched sub-session may call only: conductor_override, conductor_status, conductor_surface. Every other conductor tool belongs to the orchestrator, and a call from a dispatched session is refused by name — a session cannot answer its own question, defer its own item, close its own run or widen its own scope.
 
-The harness re-derives which of these is legal on every request and names the one it recommends. A call out of order is refused, not negotiated.
+The harness re-derives which of these is legal on every request and states it as the live block's `Next action:` line. A call out of order is refused, not negotiated.
 
 ## When you are stuck
 

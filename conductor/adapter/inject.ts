@@ -153,14 +153,21 @@ function renderStateBlock(
     // No hardcoded terminality claim: legalTools already computed the AUTHORITATIVE
     // reason nothing is recommended (terminal run, stalled EXECUTING wave, non-work
     // INTAKE, …). Render it verbatim so the block is never falsely "terminal".
-    lines.push(`Recommended next tool: none. ${verdict.why}`);
+    lines.push(`Next action: none. ${verdict.why}`);
   } else if (recommended.args.itemId !== undefined) {
-    lines.push(`Recommended next tool: ${recommended.tool} on ${recommended.args.itemId}`);
+    lines.push(`Next action: call ${recommended.tool} on ${recommended.args.itemId}.`);
   } else {
-    lines.push(`Recommended next tool: ${recommended.tool}`);
+    lines.push(`Next action: call ${recommended.tool}.`);
   }
 
-  lines.push(`Other legal tools available now: ${otherLegal} (call conductor_status to enumerate them).`);
+  // The count is honest and stays. The instruction that used to follow it — "call
+  // conductor_status to enumerate them" — does not: it named a read-only tool that
+  // advances nothing, in the line immediately after the one naming the action that
+  // does, and `conductor_status` is the orchestrator's most common wrong call in the
+  // 14.2 capture. A block that states the action and then supplies a way to go
+  // looking for alternatives is arguing with itself, and this is the sentence that
+  // was doing the arguing.
+  lines.push(`Other legal tools available now: ${otherLegal}. None of them is the next action.`);
   lines.push(`Open questions: ${openQuestions}`);
   lines.push(`Items blocked: ${blocked} · deferred: ${deferred}`);
   lines.push(`Taint count: ${ctx.taintCount} · overrides remaining: ${ctx.overridesRemaining}`);
@@ -198,7 +205,10 @@ export function renderNoRunStateBlock(): string {
   return [
     "Conductor live state — re-stated every request (§6.4), never remembered.",
     "Run state: none — this workspace has no live conductor run.",
-    "Recommended next tool: none. A run is created when the orchestrator receives a prompt (§3.2); " +
+    // conductor_status is named here deliberately and is not the D26 case: with no
+    // live run there IS no next action to compete with, so pointing at the one tool
+    // that can say what the workspace holds is the whole of the useful advice.
+    "Next action: none. A run is created when the orchestrator receives a prompt (§3.2); " +
       "conductor_status reports what this workspace already holds.",
   ].join("\n");
 }

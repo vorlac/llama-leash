@@ -1157,3 +1157,49 @@ test("[smoke-F20] a redirect to the null device is not a write, and every other 
     "the exemption hides nothing: the real write in the same command line still surfaces",
   );
 });
+
+// ===========================================================================
+// [D26/D13] A refusal names the next legal action, not only the illegal one.
+//
+// Measured in the 14.2 campaign: a testWriter sub-session wrote its test, then
+// ran it and redirected the output so it could read the result —
+//
+//   node --test tests/visible.test.ts > /tmp/opencode/i1-red.log 2>&1; echo "EXIT=$?"; grep -E ...
+//
+// Everything there is what the stage is for. The only defect is the scratch
+// path, and nothing in the repository told that session where scratch space is:
+// `grep -i 'scratch|temp file|/tmp'` over all nine doctrine packs and
+// docs/developer/gates.md returned nothing. The gate was right, the refusal was
+// right, and the session lost the verification it had just built.
+//
+// The one refusal in that campaign a role recovered from productively is the
+// decompose guard's, which lists three concrete remedies. Every refusal that
+// stopped at the rule produced a stall, and on this hardware a turn spent
+// discovering the remedy costs minutes.
+// ===========================================================================
+
+test("[D13] an out-of-tree edit is refused with the tree it may write under", () => {
+  // The exact path the 14.2 testWriter reached for — absolute and genuinely outside
+  // TREE, so this lands on the tree check rather than the fileScope check that
+  // follows it. Built through the shared fixture so it cannot drift from how every
+  // other edit decision in this file is constructed.
+  const decision = decideEdit(editInput({ path: "/tmp/opencode/i1-red.log" }));
+
+  assert.equal(decision.action, "deny", "an out-of-tree path is still refused");
+  const reason = decision.reason ?? "";
+  assert.ok(
+    reason.includes("outside this session's tree"),
+    "the rule is still named: " + reason,
+  );
+  assert.ok(
+    reason.includes(String(TREE)),
+    "the refusal must name the tree the session MAY write under, so the remedy does not " +
+      "cost a turn to discover: " + reason,
+  );
+  assert.ok(
+    /scratch/i.test(reason),
+    "scratch files are the case that produced this defect and the message must cover them " +
+      "explicitly, since a session reaching for /tmp is not looking for a source path: " +
+      reason,
+  );
+});

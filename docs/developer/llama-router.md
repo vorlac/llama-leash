@@ -169,11 +169,32 @@ derived from the role, not chosen per request: `orchestrator` and `planner` tag
 a tree-less orchestrator — so the router treats those requests as ungrouped rather than
 lumping them into one bucket.
 
-`X-Conductor-Schema` is emitted only when the dispatching job flags structured output, and
-no production call site sets that flag today: `composeDelivery` is called from the
-composition root with no job argument, so at HEAD the header never reaches the wire. The
-router-side machinery that reads it is built, tested and inert, which is why every
-`schemaMissing` count from a real session reads zero.
+`X-Conductor-Schema` is emitted only when the dispatching job flags structured output.
+
+**This section previously said no production call site sets that flag, that the header never
+reaches the wire at HEAD, and that the router-side machinery is therefore inert. Measurement
+says otherwise, and the machinery is live.** Across the 14.2 campaign's 550 ledger rows, 170
+carry `schemaMissing: true` — a column the router writes *only* when `observation.tagged` holds,
+and `tagged` means the request arrived carrying `X-Conductor-Schema: required`
+(`router/schema-observer.hpp`: "an untagged request is never missing"). The router's own log
+carries 242 of the matching warn lines:
+
+```
+carries 'X-Conductor-Schema: required' but declares no schema — counted schemaMissing (role 'mechanical', group '')
+```
+
+So the header does reach the wire from real sessions, at least on the `mechanical` role. What
+holds is the *second* half of the old claim: those requests declare no schema in the body, which
+is consistent with opencode 1.18.15 emitting no `response_format` for a prompt-shaped structured
+output (see [scheduling-and-fanout.md](scheduling-and-fanout.md), "Independent schema validation
+with bounded retry"). The observation is therefore doing exactly what §4.4 designed it to do —
+recording, at `warn`, that a request which declared a schema requirement did not carry one — and
+`schemaConformed` stays null throughout because no schema was ever there to conform to.
+
+Read `schemaMissing` as a live signal about the *declaration*, not as dead code. Its companion
+`schemaConformed` is the inert one: null on all 550 rows, which
+[HONEST-LIMITS.md](../../conductor/docs/HONEST-LIMITS.md) records as limit 9's conditional
+resolving.
 
 `chat.headers` output reaching the provider as real HTTP headers is verified against
 opencode 1.18.15 in [wire-notes.md](../../conductor/adapter/wire-notes.md), which also pins

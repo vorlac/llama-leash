@@ -3084,6 +3084,60 @@ class PlanAndCellTests(unittest.TestCase):
         # Off by default: the driver's ordinary output is unchanged.
         self.assertEqual(cb.write_cell_artifacts(None, cell, cb.CellTrace(), []), [])
 
+    def test_the_docs_name_the_paths_the_code_writes(self):
+        """[D28-doc-paths] a path a doc tells a reader to use is a path the code
+        produces.
+
+        `docs/user/watching-a-run.md` carries a copy-paste command for finding a
+        live run directory. Two changes in one day broke it and nothing failed:
+        the work root moved off $TMPDIR, and the artifacts moved beside the
+        results because the work root is now cleared at launch. Neither change
+        touched that file, and a reader following it would have got an empty
+        `find` and no explanation.
+
+        This is the pitfall the campaign register states in the abstract — a
+        claim only prose supports drifts, a claim a test checks does not — applied
+        to the narrow case a test can actually hold: a literal path, named in a
+        doc, that some constant in the code decides.
+        """
+        root = Path(__file__).resolve().parent.parent
+        doc = (root / "docs" / "user" / "watching-a-run.md").read_text()
+
+        launcher = (root / "scripts" / "run_and_watch.py").read_text()
+        self.assertIn(
+            ".llama-leash-work",
+            launcher,
+            "the launcher names its work root as a literal; if that stops being true this "
+            "test needs a different way to read it, not deleting",
+        )
+        # assertTrue on a membership test, not assertIn: assertIn's failure message
+        # prints the haystack, and the haystack here is a twenty-kilobyte document.
+        # A failure nobody can read is a failure nobody acts on.
+        self.assertTrue(
+            ".llama-leash-work" in doc,
+            "watching-a-run.md tells a reader where to look for a live run; that path is "
+            "the launcher's work root and has to move with it",
+        )
+
+        # The artifacts the doc lists, against the code that creates each one.
+        bench = (root / "scripts" / "conductor_bench.py").read_text()
+        transcript = (root / "scripts" / "watch_transcript.py").read_text()
+        for name, source, where in (
+            ("diagnostics", bench, "conductor_bench.py"),
+            ("observed", bench, "conductor_bench.py"),
+            ("transcripts", transcript, "watch_transcript.py"),
+        ):
+            self.assertIn(
+                '"%s"' % name,
+                source,
+                "%s writes the %s/ directory" % (where, name),
+            )
+            self.assertTrue(
+                "%s/" % name in doc,
+                "watching-a-run.md must name the %s/ artifacts, or a run leaves records "
+                "nobody is told to read" % name,
+            )
+
     def test_hidden_never_visible(self):
         """[14.1-hidden-never-visible] the hidden tests never reach the model:
         seed and hidden paths are disjoint, no arm's prompt/argv/env/config

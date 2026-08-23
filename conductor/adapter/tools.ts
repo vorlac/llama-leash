@@ -4492,7 +4492,13 @@ export async function handleVetTest(input: VetTestInput): Promise<VetTestResult>
   // Floored for the same reason as testRepairAttempts: a fractional fan-out would
   // dispatch MORE critics than configured (2.5 -> 3), which can also breach a
   // fractional parallel.maxReaders ceiling.
-  const critics = Math.floor(readFanout("vet", config));
+  // The run's own classification narrows this: a trivial run gets one critic
+  // (core/schedule.ts TRIVIAL_VET_CRITICS). The classifier and the skeptic have
+  // both already judged this small, and the vet wave is the most expensive stage
+  // in the pipeline against its least valuable use.
+  const critics = Math.floor(
+    readFanout("vet", config, store.loadRun(runId).classification.kind),
+  );
   if (critics < 1) {
     throw new Error(
       VET_TEST_TOOL +
