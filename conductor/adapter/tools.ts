@@ -1984,10 +1984,56 @@ export interface DecomposeResult {
 // config.workflow.trivialMaxFiles bounds what may skip planning altogether (§2.10), a
 // different number with a different job, and sourcing this line from it states one cap
 // to the planner while the pack's generated mechanics block and the gate state another.
+// The repository paths a decomposition may legally name, as a bounded listing.
+//
+// A planner is asked for items whose `fileScope` names real files — the checklist
+// forbids a wildcard-headed entry and counts a scope as the files it matches — and
+// its brief carries the request, the caps and the reply schema. Nothing in it says
+// which files exist. So the planner goes and looks: measured across four conductor
+// cells of the 14.2 campaign, 75-80% of a sub-session's turns were `read`, `glob`
+// or `grep`, at one to five minutes a turn on a local model. The 900-second
+// sub-session budget is not short for the planning; it is short for the planning
+// plus a repository tour.
+//
+// Bounded two ways, because an unbounded listing trades the planner's turns for the
+// context budget and that is not a trade worth making blind:
+//   - to the globs that own verification, since those are the paths a behavioral
+//     item may scope, and a path no valid answer could contain is noise;
+//   - to DECOMPOSE_LISTING_CAP entries, with the count stated when it truncates so
+//     the planner knows the list is partial rather than believing it complete.
+const DECOMPOSE_LISTING_CAP = 60;
+
+export function scopableFiles(root: string, config: Config): string[] {
+  const globs = config.verify.behavioralPaths.map((glob) => normalizeRepoRel(glob));
+  if (globs.length === 0) return [];
+  const found: string[] = [];
+  for (const rel of setupWalkRepoFiles(root)) {
+    if (globs.some((glob) => globMatch(glob, rel))) found.push(rel);
+  }
+  found.sort();
+  return found;
+}
+
+// The listing as the brief states it: the paths, or an honest silence.
+export function scopableFilesSection(files: readonly string[]): string {
+  if (files.length === 0) return "";
+  const shown = files.slice(0, DECOMPOSE_LISTING_CAP);
+  const head =
+    files.length > shown.length
+      ? "\n\nThe files those globs own (" +
+        String(shown.length) +
+        " of " +
+        String(files.length) +
+        ", truncated — name a directory when the one you want is not listed):\n"
+      : "\n\nThe files those globs own, in full:\n";
+  return head + shown.map((rel) => "- " + rel).join("\n") + "\n";
+}
+
 export function decomposePrompt(
   userPrompt: string,
   config: Config,
   packs: Record<string, string>,
+  scopable: readonly string[] = [],
 ): string {
   const behavioralPaths =
     config.verify.behavioralPaths.length > 0
@@ -2011,6 +2057,7 @@ export function decomposePrompt(
     String(ITEM_MAX_FILES) +
     " files and one acceptance cluster; split anything bigger.\n" +
     ponytailLaw(config) +
+    scopableFilesSection(scopable) +
     "\nREQUEST:\n" +
     userPrompt
   );
@@ -2063,7 +2110,12 @@ export async function handleDecompose(input: DecomposeInput): Promise<DecomposeR
   }
 
   // (2) derive: the planner proposes, the §3.2 table disposes.
-  const basePrompt = decomposePrompt(run.prompt, config, input.packs);
+  const basePrompt = decomposePrompt(
+    run.prompt,
+    config,
+    input.packs,
+    scopableFiles(store.root, config),
+  );
   let promptText = basePrompt;
   let accepted: Queue | null = null;
   let violations: string[] = [];

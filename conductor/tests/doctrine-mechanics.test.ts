@@ -28,6 +28,9 @@
 // Runtime hygiene: node:test + node:assert/strict; erasable TS; pack reads go
 // through new URL("../doctrine/…", import.meta.url); no skip/todo.
 
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import * as path from "node:path";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -53,6 +56,7 @@ import { ITEM_STATES } from "../core/fsm-item.ts";
 import { decideGit } from "../core/gates-git.ts";
 import {
   decomposePrompt,
+  scopableFiles,
   itemLensPrompt,
   itemSkepticPrompt,
   lensPrompt,
@@ -857,4 +861,72 @@ test("I4B-4: every doctrine pack stays lean enough for a 32k context", () => {
         "32k context alongside the state block and the payload",
     );
   }
+});
+
+// ===========================================================================
+// [D34] The decompose brief names the files a decomposition may scope.
+//
+// The planner is asked for items whose fileScope names real files — the
+// checklist forbids a wildcard-headed entry and counts a scope as the files it
+// matches — and its brief carries the request, the caps and the reply schema.
+// Nothing in it says which files exist, so the planner goes and looks. Measured
+// across four conductor cells of the 14.2 campaign, 75-80% of a sub-session's
+// turns were read/glob/grep, at one to five minutes a turn:
+//
+//   planner      14 turns, 11 discovery  (79%)
+//   skeptic       5 turns,  4 discovery  (80%)
+//   mechanical    4 turns,  3 discovery  (75%)
+//
+// The listing is bounded to the globs that own verification, because a path no
+// valid answer could contain is noise, and to a cap, because an unbounded listing
+// trades the planner's turns for the context budget.
+// ===========================================================================
+
+test("[D34] the decompose brief lists the scopable files, bounded and honest about truncation", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "d34-"));
+  for (const rel of [
+    "src/cli.py",
+    "src/registry.py",
+    "src/solvers/p001.py",
+    "tests/check_visible.py",
+    "README.md",
+  ]) {
+    mkdirSync(path.join(root, path.dirname(rel)), { recursive: true });
+    writeFileSync(path.join(root, rel), "x");
+  }
+
+  const config = testConfig();
+  const files = scopableFiles(root, config);
+
+  // Only the paths a behavioral item could legally scope.
+  assert.deepEqual(
+    files,
+    ["src/cli.py", "src/registry.py", "src/solvers/p001.py"],
+    "the listing is the files behavioralPaths owns — not the repo, and not nothing",
+  );
+
+  const brief = decomposePrompt("do the work", config, packMap(), files);
+  for (const rel of files) {
+    assert.ok(brief.includes(rel), `the brief must name ${rel}, or the planner goes looking`);
+  }
+  assert.ok(
+    !brief.includes("README.md"),
+    "a path no valid fileScope could contain is noise in a brief that costs context",
+  );
+
+  // Truncation is stated, never silent: a planner that believes a partial list is
+  // complete will name nothing outside it, which is worse than being told to glob.
+  const many = Array.from({ length: 200 }, (_, i) => `src/f${String(i).padStart(3, "0")}.py`);
+  const truncated = decomposePrompt("do the work", config, packMap(), many);
+  assert.match(truncated, /truncated/, "a capped listing says so:\n" + truncated.slice(-400));
+  assert.match(truncated, /\d+ of 200/, "and says how much of it is shown");
+
+  // Absent configuration degrades to silence rather than to a lie.
+  assert.equal(scopableFiles(root, { ...config, verify: { ...config.verify, behavioralPaths: [] } } as never).length, 0);
+  assert.ok(
+    !decomposePrompt("do the work", config, packMap(), []).includes("The files those globs own"),
+    "no listing means no section, not an empty one",
+  );
+
+  rmSync(root, { recursive: true, force: true });
 });
