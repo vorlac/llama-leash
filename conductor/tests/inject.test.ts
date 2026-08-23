@@ -74,6 +74,7 @@ import { fileURLToPath } from "node:url";
 // The subject under test — absent at red time (the missing-subject red).
 import {
   buildSystemAppend,
+  recommendedToolOf,
   paramsForRole,
   headersFor,
   loadPacks,
@@ -749,5 +750,31 @@ test("[D32] a sub-session is never told to call a tool its role may not call", (
       callerAllowed(tool, caller).ok,
       "the block must never name a tool the gate refuses: " + tool,
     );
+  }
+});
+
+test("[D32] the receipt records the recommendation the block actually delivered", () => {
+  const r = run({ state: "INTAKE" });
+  const items: ReturnType<typeof item>[] = [];
+
+  // The invariant this pins is the one recommendedToolOf's docstring claims and
+  // that the role narrowing nearly broke: the block renders a sentence, the §7.4
+  // receipt records a field, and they are the same decision. A receipt naming a
+  // tool the block did not name makes the observer's "recommended vs actual"
+  // column score a request nobody sent — the exact signal D08 was misread from.
+  for (const entry of [ORCH, { role: "planner" } as SessionRegistryEntry]) {
+    const block = buildSystemAppend(entry, r, items, [], PACKS, ctx()).at(-1) ?? "";
+    const receipt = recommendedToolOf(entry, r, items, [], ctx());
+    if (receipt.tool === null) {
+      assert.ok(
+        !/Next action: call /.test(block),
+        `${entry.role}: receipt names no tool but the block names one:\n${block}`,
+      );
+    } else {
+      assert.ok(
+        block.includes(`Next action: call ${receipt.tool}`),
+        `${entry.role}: receipt says ${receipt.tool}, block says otherwise:\n${block}`,
+      );
+    }
   }
 });

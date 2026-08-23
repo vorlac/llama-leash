@@ -29,7 +29,7 @@ import { readFileSync } from "node:fs";
 import * as path from "node:path";
 
 import { legalTools } from "../core/gates-phase.ts";
-import type { GateRun, GateItem, GateQuestion } from "../core/gates-phase.ts";
+import type { GateRun, GateItem, GateQuestion, RecommendedTool } from "../core/gates-phase.ts";
 import { callableBy, callerAllowed, callerKindOf } from "../core/tool-legality.ts";
 import type { CallerIdentity } from "../core/tool-legality.ts";
 import type { SessionRegistryEntry } from "./chat-message.ts";
@@ -118,6 +118,29 @@ function subSessionTools(): string {
   return callableBy("sub-session").join(", ");
 }
 
+// [D32] The run's next action, narrowed to what THIS session may actually call.
+//
+// `legalTools` answers "where does the run go next", which is a question about the
+// run and not about whoever is reading the answer. §3.5 lets a sub-session call
+// only override/status/surface, so handing a planner the run's stage tool is an
+// instruction the gate then refuses it for — measured byte-exact in the 14.2
+// campaign as `#9 planner rec=conductor_decompose -> conductor_decompose REFUSED`.
+//
+// ONE derivation, because the block renders it into a sentence and the §7.4 receipt
+// records it as a field, and a receipt that disagrees with the block it accompanies
+// makes the "recommended vs actual" signal describe a request nobody sent.
+function recommendationFor(
+  registryEntry: SessionRegistryEntry,
+  runRecommended: RecommendedTool | null,
+): RecommendedTool | null {
+  if (runRecommended === null) return null;
+  const caller: CallerIdentity = {
+    role: registryEntry.role,
+    itemId: registryEntry.itemId,
+  };
+  return callerAllowed(runRecommended.tool, caller).ok ? runRecommended : null;
+}
+
 // Render the live state block — the LAST append entry, ≤30 lines, re-stated every
 // request. It SUMMARIZES: it names only the single recommended tool (and, for a
 // sub-session, its own active item), never the full item list, so it stays bounded
@@ -144,15 +167,8 @@ function renderStateBlock(
   //
   // The planner did what the block said and was refused for it. D15 recorded that
   // as the planner reaching for a forbidden tool; it was the block handing it one.
-  const caller: CallerIdentity = {
-    role: registryEntry.role,
-    itemId: registryEntry.itemId,
-  };
   const runRecommended = verdict.recommended;
-  const recommended =
-    runRecommended !== null && !callerAllowed(runRecommended.tool, caller).ok
-      ? null
-      : runRecommended;
+  const recommended = recommendationFor(registryEntry, runRecommended);
   // The recommended tool is always one of the legal tools, so the count of the
   // OTHER legal tools excludes it (and excludes nothing when nothing is recommended).
   const otherLegal = verdict.legal.size - (recommended !== null ? 1 : 0);
@@ -200,13 +216,12 @@ function renderStateBlock(
     lines.push(`Next action: call ${recommended.tool}.`);
   }
 
-  // The count is honest and stays. The instruction that used to follow it — "call
-  // conductor_status to enumerate them" — does not: it named a read-only tool that
-  // advances nothing, in the line immediately after the one naming the action that
-  // does, and `conductor_status` is the orchestrator's most common wrong call in the
-  // 14.2 capture. A block that states the action and then supplies a way to go
-  // looking for alternatives is arguing with itself, and this is the sentence that
-  // was doing the arguing.
+  // The count, and no invitation to go and get them. Naming a way to enumerate the
+  // alternatives — "call conductor_status to see them" — belongs to a block with no
+  // action to name: `conductor_status` is read-only, advances nothing, and is the
+  // orchestrator's most common wrong call in the 14.2 capture. A block that states
+  // the action and then offers a route to alternatives argues with itself, and the
+  // reader resolves that argument however it likes.
   lines.push(`Other legal tools available now: ${otherLegal}. None of them is the next action.`);
   lines.push(`Open questions: ${openQuestions}`);
   lines.push(`Items blocked: ${blocked} · deferred: ${deferred}`);
@@ -219,18 +234,26 @@ function renderStateBlock(
  * The single next tool the state block names, as DATA.
  *
  * The block renders it into a sentence a human reads; the §7.4 receipt records it
- * as a field an observer can score. Both come from this one call into legalTools,
- * so a receipt that disagreed with the block it accompanies is not constructible —
+ * as a field an observer can score. Both come from `recommendationFor`, so a
+ * receipt that disagreed with the block it accompanies is not constructible —
+ * including the role narrowing, which is where the two most easily diverge: a
+ * receipt reading the run-level verdict beside a block that narrowed it would
+ * record `recommended: conductor_classify` against a session told "reply with your
+ * result", and the observer's mismatch column would score a request nobody sent —
  * and without the field, "recommended vs actual", the signal that names a model
  * ignoring its own state block sixteen turns running, is unrecorded on every run.
  */
 export function recommendedToolOf(
+  registryEntry: SessionRegistryEntry,
   run: GateRun,
   items: GateItem[],
   questions: GateQuestion[],
   ctx: InjectCtx,
 ): { tool: string | null; itemId: string | null } {
-  const recommended = legalTools(run, items, questions, ctx.repoConfigured, ctx.publishEnabled).recommended;
+  const recommended = recommendationFor(
+    registryEntry,
+    legalTools(run, items, questions, ctx.repoConfigured, ctx.publishEnabled).recommended,
+  );
   if (recommended === null) return { tool: null, itemId: null };
   const itemId = recommended.args.itemId;
   return { tool: recommended.tool, itemId: typeof itemId === "string" ? itemId : null };
@@ -433,7 +456,7 @@ export function composeDelivery(input: {
   const recommendation =
     state === null
       ? { tool: null, itemId: null }
-      : recommendedToolOf(state.run, state.items, state.questions, state.ctx);
+      : recommendedToolOf(registryEntry, state.run, state.items, state.questions, state.ctx);
   return {
     role: registryEntry.role,
     packFiles,

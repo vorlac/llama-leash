@@ -166,6 +166,14 @@ export function subSessionTools(): string[] {
 // stage that dispatches nobody — the harness does that work itself.
 function stageWithRoles(tool: string): string {
   const roles = TOOL_BINDINGS[tool]?.dispatches ?? [];
+  // The bracket is ambiguous to the roles inside it, and deliberately left so.
+  // This line also reaches plan.md, decompose.md and skeptic.md, where a planner
+  // reads `conductor_decompose (planner)` as its own tool — §3.5 refuses exactly
+  // that call, and the 14.2 capture caught the refusal. Spelling "dispatches"
+  // fixes the reading and costs ~50 bytes a pack against a 7000-byte budget
+  // core.md sits 48 under. The live state block is the role-aware channel and
+  // carries the same fact per request, which is why the bytes stay unspent —
+  // recorded so the next editor spends them knowingly if the budget frees up.
   return roles.length === 0 ? tool : tool + " (" + roles.join(", ") + ")";
 }
 
