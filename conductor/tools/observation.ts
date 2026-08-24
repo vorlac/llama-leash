@@ -487,8 +487,13 @@ export interface TurnRow {
   sessionID: string | null;
   role: string;
   // The single next tool the injected state block named, when the record carries
-  // it. Null is "not recorded", never "none recommended".
+  // it. Null is "not recorded"; `recommendedNone` is "recorded, and the answer
+  // was none". The two are different facts and a reader acts on them
+  // differently: the first is a journal that lost a field, the second is the
+  // gate narrowing the run's next action to a role that may not take it (§3.5),
+  // which is the ordinary shape of every sub-session turn.
   recommended: string | null;
+  recommendedNone: boolean;
   recommendedItem: string | null;
   actual: string | null;
   alsoCalled: string[];
@@ -876,6 +881,11 @@ export function deriveLiveConsole(input: LiveConsoleInput): LiveConsole {
           sessionID,
           role: str(data["role"]),
           recommended: strOrNull(data["recommended"]) ?? strOrNull(data["recommendedTool"]),
+          // Key PRESENT and null is a recorded "none"; key absent is a record
+          // that never carried one. JSON keeps the two apart and so does this.
+          recommendedNone:
+            ("recommended" in data && data["recommended"] === null) ||
+            ("recommendedTool" in data && data["recommendedTool"] === null),
           recommendedItem: strOrNull(data["recommendedItem"]) ?? strOrNull(data["recommendedItemId"]),
           actual: null,
           alsoCalled: [],
@@ -1413,9 +1423,11 @@ function tokenCell(turn: TurnRow): string {
 /** One turn, as a watcher reads it: what was asked for, what happened. */
 export function turnLine(turn: TurnRow): string {
   const recommended =
-    turn.recommended === null
-      ? "rec=(unrecorded)"
-      : `rec=${turn.recommended}${turn.recommendedItem === null ? "" : `/${turn.recommendedItem}`}`;
+    turn.recommended !== null
+      ? `rec=${turn.recommended}${turn.recommendedItem === null ? "" : `/${turn.recommendedItem}`}`
+      : turn.recommendedNone
+        ? "rec=none"
+        : "rec=(unrecorded)";
   const actual = turn.actual ?? (turn.noToolCall ? MARK_NO_TOOL : "-");
   const marks: string[] = [];
   if (turn.mismatch) marks.push(MARK_MISMATCH);

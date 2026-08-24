@@ -218,17 +218,47 @@ def check_arms_are_comparable(rows: Sequence[Dict[str, Any]]) -> List[Finding]:
     Not a defect that has occurred; a property the campaign depends on and that
     nothing else checks. A task missing an arm produces a scoreboard whose rows
     are not comparable, and it looks exactly like a scoreboard whose rows are.
+
+    A run that was stopped, or is still in flight, is missing arms on its LAST
+    task for a reason that is not a defect. Reporting that as a finding on every
+    incomplete run is how a checker teaches its reader to skip its output — the
+    mirror of the silent-skip this script exists to prevent, and just as fatal to
+    it. So incompleteness is named as incompleteness, once, and the arm check
+    runs over the tasks that finished.
     """
     by_task: Dict[str, set] = {}
+    order: List[str] = []
     for row in rows:
+        if row["taskId"] not in by_task:
+            order.append(row["taskId"])
         by_task.setdefault(row["taskId"], set()).add(row["arm"])
     if not by_task:
         return []
     full = max((arms for arms in by_task.values()), key=len)
+
+    # The task a truncated run stopped inside is the last one to have started.
+    last_started: Dict[str, str] = {}
+    for row in rows:
+        prev = last_started.get(row["taskId"], "")
+        if row.get("startedIso", "") > prev:
+            last_started[row["taskId"]] = row.get("startedIso", "")
+    tail = max(last_started, key=lambda t: last_started[t]) if last_started else None
+
     findings = []
     for task, arms in sorted(by_task.items()):
         missing = full - arms
-        if missing:
+        if not missing:
+            continue
+        if task == tail:
+            findings.append(
+                Finding(
+                    "PARTIAL",
+                    task,
+                    "run ended inside this task (missing %s) — incomplete, not a defect"
+                    % ", ".join(sorted(missing)),
+                )
+            )
+        else:
             findings.append(
                 Finding("ARMS", task, "missing %s" % ", ".join(sorted(missing)))
             )

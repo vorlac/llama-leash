@@ -28,8 +28,9 @@ import {
   crossedThresholds,
   deriveSnapshot,
   deriveStrainSignals,
+  turnLine,
 } from "../tools/observation.ts";
-import type { ObservationInput } from "../tools/observation.ts";
+import type { ObservationInput, TurnRow } from "../tools/observation.ts";
 import { observeRunDir, renderReport, writeBundle } from "../tools/observe.ts";
 
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -435,4 +436,71 @@ test("observation: the observer's default per-slot window is the one scripts/con
   assert.ok(match, "conductor_wiring.py must declare PER_SLOT_CONTEXT_TOKENS on its own line");
   assert.equal(DEFAULT_PER_SLOT_CONTEXT_TOKENS, Number(match![1]));
   assert.ok(DEFAULT_PER_SLOT_CONTEXT_TOKENS > 11441, "the default window must hold the measured first request");
+});
+
+// ===========================================================================
+// [D32] "not recorded" and "recorded as none" are different facts.
+//
+// A sub-session's receipt carries recommended: null on purpose — the run's next
+// stage tool is not a tool §3.5 lets it call, so the gate narrows it away. A
+// journal written before the field existed carries no key at all. Rendering both
+// as (unrecorded) tells a reader the record lost something when the record is
+// answering precisely.
+//
+// The distinction is free: JSON keeps a present-and-null key apart from an absent
+// one, and this reads that rather than inventing a sentinel.
+// ===========================================================================
+
+const BASE_TURN: TurnRow = {
+  turn: 1,
+  seq: 1,
+  tsMs: 0,
+  offsetMs: 1000,
+  sessionID: "ses_x",
+  role: "orchestrator",
+  recommended: null,
+  recommendedNone: false,
+  recommendedItem: null,
+  actual: null,
+  alsoCalled: [],
+  decision: "allow",
+  settled: true,
+  refused: false,
+  mismatch: false,
+  noToolCall: false,
+  compactionSuspected: false,
+  generationMs: null,
+  promptTokens: null,
+  completionTokens: null,
+  upstreamMs: null,
+};
+
+test("[D32] a recorded 'none' recommendation renders as none, not as unrecorded", () => {
+  const none = turnLine({
+    ...BASE_TURN,
+    role: "planner",
+    recommended: null,
+    recommendedNone: true,
+    actual: "read",
+  });
+  assert.match(none, /rec=none/, "a narrowed recommendation is a recorded answer: " + none);
+  assert.ok(!none.includes("unrecorded"), "and is not a missing field: " + none);
+
+  const missing = turnLine({
+    ...BASE_TURN,
+    role: "orchestrator",
+    recommended: null,
+    recommendedNone: false,
+    actual: "read",
+  });
+  assert.match(missing, /rec=\(unrecorded\)/, "an absent field still says so: " + missing);
+
+  const named = turnLine({
+    ...BASE_TURN,
+    role: "orchestrator",
+    recommended: "conductor_classify",
+    recommendedNone: false,
+    actual: "read",
+  });
+  assert.match(named, /rec=conductor_classify/, named);
 });
