@@ -2014,9 +2014,59 @@ export function scopableFiles(root: string, config: Config): string[] {
   return found;
 }
 
-// The listing as the brief states it: the paths, or an honest silence.
-export function scopableFilesSection(files: readonly string[]): string {
+// The bytes of source the brief will carry before it gives up and lists paths
+// instead. Sized against what a planner already costs and what it stands to save:
+// its two packs and the brief run ~4,000 tokens of a 49,152-token window, and the
+// source of every task in the 14.2 ladder is 37 to 401 tokens. A 24 KB ceiling is
+// therefore ~50x the observed need and still under a seventh of the window, which
+// is the right shape for a bound whose job is to stop a large repository rather
+// than to ration a small one.
+const DECOMPOSE_SOURCE_BYTE_CAP = 24000;
+
+export interface ScopableSource {
+  rel: string;
+  text: string;
+}
+
+// The source behind the listing, where it fits. Read once, by the handler, so the
+// planner does not read it once per dispatch.
+export function scopableSource(root: string, files: readonly string[]): ScopableSource[] {
+  const out: ScopableSource[] = [];
+  let budget = DECOMPOSE_SOURCE_BYTE_CAP;
+  for (const rel of files) {
+    let text: string;
+    try {
+      text = readFileSync(path.join(root, rel), "utf8");
+    } catch {
+      continue; // a path that cannot be read is one the planner will read itself
+    }
+    if (text.length > budget) return [];
+    budget -= text.length;
+    out.push({ rel, text });
+  }
+  return out;
+}
+
+// The listing as the brief states it, carrying the source when it fits.
+//
+// D34 gave the planner the PATHS and measured no change: 11 discovery turns before,
+// 11 after, on two tasks. The reads were never about which files exist. They are
+// the planner reading the code, which it must do to decompose it — so the brief
+// either carries the code or the planner fetches it, once per dispatch, at a minute
+// a read (D35).
+export function scopableFilesSection(
+  files: readonly string[],
+  source: readonly ScopableSource[] = [],
+): string {
   if (files.length === 0) return "";
+  if (source.length === files.length) {
+    return (
+      "\n\nThe files those globs own, with their current contents — this is the whole of " +
+      "what they hold, so decompose from here rather than reading them again:\n\n" +
+      source.map((f) => "--- " + f.rel + " ---\n" + f.text.trimEnd() + "\n").join("\n") +
+      "\n"
+    );
+  }
   const shown = files.slice(0, DECOMPOSE_LISTING_CAP);
   const head =
     files.length > shown.length
@@ -2025,7 +2075,7 @@ export function scopableFilesSection(files: readonly string[]): string {
         " of " +
         String(files.length) +
         ", truncated — name a directory when the one you want is not listed):\n"
-      : "\n\nThe files those globs own, in full:\n";
+      : "\n\nThe files those globs own, in full (read the ones you need):\n";
   return head + shown.map((rel) => "- " + rel).join("\n") + "\n";
 }
 
@@ -2034,6 +2084,7 @@ export function decomposePrompt(
   config: Config,
   packs: Record<string, string>,
   scopable: readonly string[] = [],
+  source: readonly ScopableSource[] = [],
 ): string {
   const behavioralPaths =
     config.verify.behavioralPaths.length > 0
@@ -2057,7 +2108,7 @@ export function decomposePrompt(
     String(ITEM_MAX_FILES) +
     " files and one acceptance cluster; split anything bigger.\n" +
     ponytailLaw(config) +
-    scopableFilesSection(scopable) +
+    scopableFilesSection(scopable, source) +
     "\nREQUEST:\n" +
     userPrompt
   );
@@ -2110,11 +2161,13 @@ export async function handleDecompose(input: DecomposeInput): Promise<DecomposeR
   }
 
   // (2) derive: the planner proposes, the §3.2 table disposes.
+  const files = scopableFiles(store.root, config);
   const basePrompt = decomposePrompt(
     run.prompt,
     config,
     input.packs,
-    scopableFiles(store.root, config),
+    files,
+    scopableSource(store.root, files),
   );
   let promptText = basePrompt;
   let accepted: Queue | null = null;

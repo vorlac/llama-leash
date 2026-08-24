@@ -57,6 +57,7 @@ import { decideGit } from "../core/gates-git.ts";
 import {
   decomposePrompt,
   scopableFiles,
+  scopableSource,
   itemLensPrompt,
   itemSkepticPrompt,
   lensPrompt,
@@ -927,6 +928,70 @@ test("[D34] the decompose brief lists the scopable files, bounded and honest abo
     !decomposePrompt("do the work", config, packMap(), []).includes("The files those globs own"),
     "no listing means no section, not an empty one",
   );
+
+  rmSync(root, { recursive: true, force: true });
+});
+
+// ===========================================================================
+// [D36] The decompose brief carries the source, not just the paths.
+//
+// D34 gave the planner the PATHS and measured no change: 11 discovery turns
+// before, 11 after, on two tasks, 79% both times. The reads were never about
+// which files exist. They are the planner reading the code, which it must do to
+// decompose it.
+//
+// D35 priced that: conductor reads track (sub-sessions dispatched) x (repository
+// size), measured 29 against a predicted 30 on one cell and 48 against 56 on
+// another, versus baseline's single pass. Four to five of every six or seven
+// dispatches are the planner, re-dispatched by a watchdog that killed it for
+// being slow — and a fresh planner must read everything again.
+//
+// The arithmetic says carry the code: the planner's packs and brief run ~4,000
+// tokens of a 49,152-token window, and the source of every task in the ladder is
+// 37 to 401 tokens.
+// ===========================================================================
+
+test("[D36] the brief carries file contents where they fit, and falls back to paths where they do not", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "d36-"));
+  const write = (rel: string, body: string): void => {
+    mkdirSync(path.join(root, path.dirname(rel)), { recursive: true });
+    writeFileSync(path.join(root, rel), body);
+  };
+  write("src/cli.py", "def main(argv):\n    return 0\n");
+  write("src/registry.py", "_SOLVERS = {}\n");
+  write("README.md", "# not scopable\n");
+
+  const config = testConfig();
+  const files = scopableFiles(root, config);
+  const source = scopableSource(root, files);
+
+  assert.equal(source.length, files.length, "a small repo is carried whole");
+  const brief = decomposePrompt("do the work", config, packMap(), files, source);
+
+  // The code itself, not a promise of it.
+  assert.match(brief, /def main\(argv\)/, "the brief carries the source it names:\n" + brief.slice(-600));
+  assert.match(brief, /_SOLVERS = \{\}/, "every scopable file, not the first one");
+  assert.ok(!brief.includes("not scopable"), "and nothing behavioralPaths does not own");
+  assert.match(
+    brief,
+    /rather than reading them again/,
+    "the brief says why it is there — a planner that does not know the code is complete reads it anyway",
+  );
+
+  // Over budget, it degrades to D34's listing rather than to a truncated file. A
+  // half-read source is worse than a named path: the planner cannot tell which
+  // half it has.
+  const big = path.join(root, "src", "big.py");
+  writeFileSync(big, "x".repeat(30000));
+  const bigFiles = scopableFiles(root, config);
+  const bigSource = scopableSource(root, bigFiles);
+  assert.equal(bigSource.length, 0, "over the cap, no source is carried at all");
+  const bigBrief = decomposePrompt("do the work", config, packMap(), bigFiles, bigSource);
+  assert.ok(!bigBrief.includes("x".repeat(200)), "no file is inlined in part");
+  assert.match(bigBrief, /read the ones you need/, "and the planner is told to read instead");
+  for (const rel of bigFiles) {
+    assert.ok(bigBrief.includes(rel), `the path is still named: ${rel}`);
+  }
 
   rmSync(root, { recursive: true, force: true });
 });
