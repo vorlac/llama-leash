@@ -61,6 +61,12 @@ An in-flight session that never settles is the watchdog's problem and will
 surface as `subsession.abort`. A wave with nothing in flight and nothing
 progressing is the interesting case: check for a frozen tree.
 
+"Never settles" is not the same as "hung", and on a slow model the difference is
+the whole diagnosis. A sub-session generating steadily and a sub-session wedged
+look identical from outside — both are in flight, neither has returned. The
+watchdog cannot tell them apart either, so an abort says the session ran out of
+time, not that it stopped working. See `aborts` below.
+
 ### 4. Is the run waiting on a human?
 
 `open questions` names each one and the path the answer is dropped at. A run that
@@ -77,7 +83,7 @@ The strain block. Read it as a set of ratios rather than counts:
 | `overrides minted / spent` | The plan's scopes do not match the work. A spend is a deny that was bypassed, and it taints the item permanently. |
 | `waves` and how many carried one job | A wave of one is the scheduler finding nothing it could run alongside. Against items with disjoint scopes that is `scopesIntersect` over-approximating, which is a conductor cost, not a task property. |
 | `receipt retries` | Sub-sessions are not producing the shape the protocol asked for. That is a briefing failure, not a capability one. |
-| `aborts` | The watchdog killed a hung sub-session. Never routine. |
+| `aborts` | The watchdog's deadline passed before the sub-session returned. **Not necessarily hung, and not necessarily rare.** The deadline is `parallel.subSessionTimeoutMs` (900,000 by default) and it is a wall-clock budget, so whether it is generous depends entirely on the model's generation rate. On the benchmarked local model a planner emitting ~10 tok/s needs 12-18 minutes of reasoning before its first output character, and aborts were measured at **four across twelve cells — one per conductor cell** — every one of them cutting off mid-token in the middle of coherent work. Before treating an abort as a wedge, read what the session was generating: `scripts/gen_tokens.py <cell> --by-session` shows a killed session as large `reasoning` with **zero** `text`. |
 | `idle` / `reprompts` / `disengages` | The continuation engine is having to push. A local model stopping mid-run is the normal case, but repeated disengagement is the model losing the thread. |
 | `gate crashes` | A defect in conductor, not in the work. Always worth a bug. |
 | `largest brief` as a window fraction | A brief filling more than half the effective per-slot window (`scripts/conductor_wiring.py` `PER_SLOT_CONTEXT_TOKENS`, 32,768 by default; pass the served value if `serve.py --ctx` changed it) leaves the sub-session too little room for the source it is supposed to read. |
@@ -136,13 +142,63 @@ thing from one you do not.
   no gate decisions at all, but it cannot tell a quiet run from a filtered one in
   general. **A campaign that intends to answer "what did this arm reach" must run
   at `debug`.**
-- **Why a model did something.** The journal records what the harness decided,
-  not what the model was thinking. That is what the transcripts are for, and they
-  are one indirection away.
+- **Why a model did something — from the JOURNAL.** The journal records what the
+  harness decided, not what the model was thinking. But the thinking is not
+  unavailable: opencode persists every generated part, including `reasoning`, in
+  the session store. See "What the run generated" below. This bullet used to say
+  the thinking was out of reach, and that was the single most expensive thing
+  this document got wrong — the cost of a conductor run turned out to live almost
+  entirely in a channel the observability guidance told readers not to look in.
 - **The rubric.** Structure, decomposition, test quality, dead code and
   over-building are not derivable from records. They are a human or model
   judgement made against the produced artifact, and the bench driver carries them
   as their own lane for that reason.
+
+---
+
+## What the run generated
+
+Every question above is about what the harness *decided*. None of them says what
+the run spent its time on, and on a local model that is the question that decides
+whether it finishes.
+
+The bench's per-cell `tokens` figure does not answer it. That number comes from
+the router ledger and is prompt + completion summed over every request, so it is
+dominated by prompt re-sends: a cell measured at 375,939 there generated 26,725.
+Prompt bytes are not paid at the generation rate.
+
+What a run pays wall clock for is what the model *emits*, and opencode records it
+per part, typed:
+
+| part | side |
+|---|---|
+| `reasoning` | emitted |
+| `text` on an **assistant** message | emitted |
+| `text` on a **user** message | prompt — a sub-session's brief |
+| tool `input` | emitted |
+| tool `output` | prompt — file contents, command results |
+
+Neither distinction is optional. Counting tool `output` puts a cell that read one
+large file on a par with a cell that thought for ten minutes; counting a user
+`text` part credits the harness's own brief to the model's output, an error that
+grows with the dispatch count.
+
+```bash
+# every cell under a work root
+python3 scripts/gen_tokens.py ~/.llama-leash-work
+
+# one cell, attributed to the session that produced it
+python3 scripts/gen_tokens.py <cell>/r1 --by-session
+```
+
+Two readings this makes possible and nothing else does:
+
+- **A killed sub-session shows as large `reasoning` with zero `text`.** That is
+  the signature of a watchdog abort landing mid-thought rather than on a wedge.
+- **Reasoning share is a model property; reasoning VOLUME is the harness's.** On
+  the benchmarked model every arm reasons at 36-92% of what it emits, baseline
+  included, so a high share says nothing. The volume differs by up to 25x between
+  arms on the same task, and that is the number worth acting on.
 
 ---
 
