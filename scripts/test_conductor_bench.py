@@ -1651,7 +1651,13 @@ class CorpusSpeedGateTests(unittest.TestCase):
         self.assertIsNotNone(paths)
 
         gate.GATE_WARMUP_RUNS = 0
-        gate.GATE_TIMED_RUNS = 2
+        # Five, not two. The assertion below is on the MEDIAN, and with two
+        # samples the median IS the mean, so one noisy run decides it — this
+        # failed at x1.95 from runs of x1.68 and x2.34 while the baseline carried
+        # an injected delay that puts the true ratio well above 2. A wall-clock
+        # threshold measured at n=2 is not a threshold, it is a coin weighted by
+        # whatever else the machine is doing. Five runs cost about four seconds.
+        gate.GATE_TIMED_RUNS = 5
         gate.TARGET_SPEEDUP = 2.0
         gate.GATE_WORKERS = "2"
         buf = io.StringIO()

@@ -68,6 +68,22 @@ ROUTER_READY_TIMEOUT_S = 30.0
 DEFAULT_MAX_READERS = 6
 SUB_SESSION_TIMEOUT_MS = 900000
 
+# Per-role deadlines, from 75 completed dispatches and 24 watchdog deaths on the
+# benchmarked local model. SUB_SESSION_TIMEOUT_MS above stays the fallback for
+# every role with no measurement behind it. conductor/adapter/config-io.ts owns
+# the same map and conductor/tests/composition.test.ts reads this file to assert
+# the two agree, so a drift is caught rather than assumed away.
+#
+#   role         n ok   median   slowest ok   killed
+#   mechanical     25    3m29        6m10     3 (11%)
+#   skeptic        22    2m24        8m27     3 (12%)
+#   planner        28    7m48       13m38    18 (39%)
+ROLE_TIMEOUT_MS = {
+    "mechanical": 600000,
+    "skeptic": 600000,
+    "planner": 1200000,
+}
+
 # plan:639-669 (§2.2), the hand-editable half of the generated router config.
 ROUTER_CONFIG_VERSION = 1
 ROUTER_MAX_QUEUED = 64

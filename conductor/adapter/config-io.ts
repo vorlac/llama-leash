@@ -55,6 +55,29 @@ export interface LoadedConfig {
 const DEFAULT_MAX_READERS = 6;
 const SUB_SESSION_TIMEOUT_MS = 900000;
 
+// Per-role deadlines, from 75 completed dispatches and 24 watchdog deaths on the
+// benchmarked local model. The global above stays the fallback for every role
+// with no measurement behind it.
+//
+//   role         n ok   median   slowest ok   killed
+//   mechanical     25    3m29        6m10     3 (11%)
+//   skeptic        22    2m24        8m27     3 (12%)
+//   planner        28    7m48       13m38    18 (39%)
+//
+// The planner's slowest SUCCESS lands 82 seconds under the 900s ceiling, so that
+// deadline is cutting into the role's normal distribution rather than catching a
+// pathology — 20 minutes puts the ceiling above the observed range instead of
+// inside it. The other two run nowhere near 900s, and a ceiling six times a
+// role's median is not a safety net: it is twelve minutes of a stuck skeptic
+// before anything retries, which is what cost one measured T0 cell its budget.
+// Lowering those two is not a tightening, it is recovering sooner from a
+// sub-session that is already lost.
+const ROLE_TIMEOUT_MS: Record<string, number> = {
+  mechanical: 600000,
+  skeptic: 600000,
+  planner: 1200000,
+};
+
 // Freeze a value and everything reachable from it, so the exported default
 // cannot be rewritten for every later caller by one consumer's stray mutation.
 function deepFreeze<T>(value: T): T {
@@ -117,6 +140,7 @@ export const DEFAULT_CONFIG: Config = deepFreeze<Config>({
     maxImplementers: 2,
     maxReaders: DEFAULT_MAX_READERS,
     subSessionTimeoutMs: SUB_SESSION_TIMEOUT_MS,
+    roleTimeoutMs: ROLE_TIMEOUT_MS,
   },
   toolSurface: { classifyBuiltins: true, denyNetwork: true },
   models: { default: "", roles: {} },

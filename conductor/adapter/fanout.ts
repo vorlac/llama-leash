@@ -373,7 +373,13 @@ export function createFanout(
   parentSessionID = "",
 ): Fanout {
   const maxReaders = config.parallel.maxReaders;
-  const timeoutMs = config.parallel.subSessionTimeoutMs;
+
+  // Deadline per ROLE, falling back to the global — the same shape as the model
+  // resolution below, because the reason is the same: the roles differ, and one
+  // number chosen for all of them is right for none. A role with no entry keeps
+  // exactly the deadline it had.
+  const resolveTimeoutMs = (role: string): number =>
+    config.parallel.roleTimeoutMs?.[role] ?? config.parallel.subSessionTimeoutMs;
 
   // model = config.models.roles[role] ?? config.models.default (§4.1).
   const resolveModel = (job: FanoutJob): string =>
@@ -436,6 +442,7 @@ export function createFanout(
       // timeout error result. The `done` guard makes this exactly-once with every other
       // completion path, so a create that resolves LATE (after this fired) cannot
       // double-finish.
+      const timeoutMs = resolveTimeoutMs(job.role);
       timer = setTimeout(() => {
         if (done) return;
         if (sessionID.length > 0) {

@@ -567,7 +567,15 @@ const DOCUMENTED_DEFAULT_CONFIG: Config = {
     maxOverridesPerItem: 1,
     maxOverridesPerRun: 2,
   },
-  parallel: { writes: "off", maxImplementers: 2, maxReaders: 6, subSessionTimeoutMs: 900000 },
+  parallel: {
+    writes: "off",
+    maxImplementers: 2,
+    maxReaders: 6,
+    subSessionTimeoutMs: 900000,
+    // Measured per-role deadlines. The global above remains the fallback for
+    // every role with no measurement behind it, which is why it is unchanged.
+    roleTimeoutMs: { mechanical: 600000, skeptic: 600000, planner: 1200000 },
+  },
   models: { default: "", roles: {} },
   toolSurface: { classifyBuiltins: true, denyNetwork: true },
   ponytail: "full",
@@ -852,6 +860,24 @@ test("[5.4a-default-config-is-safe-not-permissive] the exported DEFAULT_CONFIG i
     Number((timeoutMatch as RegExpExecArray)[1]),
     "and the fan-out watchdog default must equal conductor_wiring.py SUB_SESSION_TIMEOUT_MS for the same reason",
   );
+
+  // The per-role map is owned twice for the same reason the two constants above
+  // are: scripts/conductor_bench.py seeds a cell's config from the Python copy,
+  // and a seeded value OVERRIDES the product default entirely — so a role tuned
+  // in TypeScript and not in Python would never reach a benchmarked run, and the
+  // two suites would stay green while measuring different software.
+  const roleBlock = /^ROLE_TIMEOUT_MS\s*=\s*\{([^}]*)\}/m.exec(wiringSource);
+  assert.ok(roleBlock !== null, "premise: conductor_wiring.py declares ROLE_TIMEOUT_MS as one literal map");
+  const wiringRoles: Record<string, number> = {};
+  for (const m of (roleBlock as RegExpExecArray)[1].matchAll(/"(\w+)"\s*:\s*(\d+)/g)) {
+    wiringRoles[m[1]] = Number(m[2]);
+  }
+  assert.deepEqual(
+    DEFAULT_CONFIG.parallel.roleTimeoutMs ?? {},
+    wiringRoles,
+    "DEFAULT_CONFIG.parallel.roleTimeoutMs must equal conductor_wiring.py ROLE_TIMEOUT_MS",
+  );
+  assert.ok(Object.keys(wiringRoles).length > 0, "premise: the map is not empty");
 });
 
 // ===========================================================================

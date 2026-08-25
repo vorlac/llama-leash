@@ -301,6 +301,18 @@ export interface Config {
     maxImplementers: number;
     maxReaders: number;
     subSessionTimeoutMs: number;
+    // Per-role deadline, overriding subSessionTimeoutMs for the roles it names.
+    // Absent or unlisted falls back to the global, so a config written before
+    // this block existed keeps exactly the behaviour it had.
+    //
+    // One number cannot be right for every role, because the roles do not have
+    // one distribution. Measured over 75 completed dispatches on the benchmarked
+    // local model: a skeptic's median is 2m24 and a planner's is 7m48, and the
+    // planner's slowest SUCCESSFUL run is 13m38 against a 15m00 ceiling — a
+    // deadline biting into the normal distribution rather than catching outliers,
+    // killing 39% of planners. The same ceiling over a skeptic is 6x its median,
+    // so a stuck one burns twelve minutes before anything retries.
+    roleTimeoutMs?: Record<string, number>;
   };
   models: { default: string; roles: Record<string, string> };
   // §2 tool-surface posture, one flag per lane so each is revertible without
@@ -858,6 +870,7 @@ const configSchema = {
         maxImplementers: numberSchema,
         maxReaders: numberSchema,
         subSessionTimeoutMs: numberSchema,
+        roleTimeoutMs: { type: "object", additionalProperties: numberSchema },
       },
       required: ["writes", "maxImplementers", "maxReaders", "subSessionTimeoutMs"],
       additionalProperties: false,

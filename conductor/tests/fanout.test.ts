@@ -1278,3 +1278,93 @@ test("[smoke-F21] the repair rewrites nothing outside a string, and a truly brok
     "a genuinely truncated reply is still reported as unparseable: " + JSON.stringify(errors),
   );
 });
+
+// ===========================================================================
+// [7.1-watchdog] per-role deadlines
+// ===========================================================================
+
+// One number cannot be right for every role, because the roles do not share a
+// distribution. Measured over 75 completed dispatches on the benchmarked local
+// model: a skeptic's median is 2m24 and a planner's is 7m48, and the planner's
+// slowest SUCCESSFUL run lands 82 seconds under the 900s ceiling — a deadline
+// cutting into the role's normal distribution rather than catching a pathology,
+// killing 39% of them. The same ceiling over a skeptic is six times its median,
+// so a stuck one burns twelve minutes before anything retries.
+test("[7.1-watchdog] a role with its own deadline is bounded by THAT deadline, not the global one", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+
+  const registry = makeRegistry();
+  const sdk = makeFakeSdk({ registry });
+  const { journal, records } = makeRecordingJournal();
+  const config = makeConfig({
+    parallel: { subSessionTimeoutMs: 20_000, roleTimeoutMs: { skeptic: 5_000 } },
+  });
+  const fanout: Fanout = createFanout(sdk.client, config, journal, registry, makeFakeTreeState());
+
+  sdk.setResponder(() => ({ kind: "hang" }));
+
+  const pending = fanout.dispatch(readJob({ role: "skeptic", itemId: "hang" }));
+  await microtasks();
+  const sid = sdk.creates[0];
+
+  t.mock.timers.tick(4_999);
+  await microtasks();
+  assert.equal(sdk.aborts.length, 0, "not yet — the role's own deadline has not elapsed");
+
+  t.mock.timers.tick(1);
+  await microtasks();
+  const result = await pending;
+
+  assert.deepEqual(sdk.aborts, [sid], "the role's deadline fires at 5s, four times before the global would");
+  assert.ok(result.error !== undefined);
+  assert.ok(
+    JSON.stringify(result.error).includes("5000"),
+    "the error names the deadline that actually fired, so a reader is not told 20000",
+  );
+  assert.ok(records.some((r) => r.event === "subsession.abort"));
+  assertKnownFanoutEvents(records);
+});
+
+test("[7.1-watchdog] a role with no entry keeps exactly the global deadline", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+
+  const registry = makeRegistry();
+  const sdk = makeFakeSdk({ registry });
+  const { journal } = makeRecordingJournal();
+  const config = makeConfig({
+    parallel: { subSessionTimeoutMs: 5_000, roleTimeoutMs: { skeptic: 60_000 } },
+  });
+  const fanout: Fanout = createFanout(sdk.client, config, journal, registry, makeFakeTreeState());
+
+  sdk.setResponder(() => ({ kind: "hang" }));
+
+  const pending = fanout.dispatch(readJob({ role: "planner", itemId: "hang" }));
+  await microtasks();
+
+  t.mock.timers.tick(5_000);
+  await microtasks();
+  const result = await pending;
+
+  assert.equal(sdk.aborts.length, 1, "an unlisted role is bounded by subSessionTimeoutMs, unchanged");
+  assert.ok(result.error !== undefined);
+});
+
+test("[7.1-watchdog] an absent roleTimeoutMs block leaves every role on the global deadline", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+
+  const registry = makeRegistry();
+  const sdk = makeFakeSdk({ registry });
+  const { journal } = makeRecordingJournal();
+  // A config written before the block existed must behave exactly as it did.
+  const config = makeConfig({ parallel: { subSessionTimeoutMs: 5_000 } });
+  const fanout: Fanout = createFanout(sdk.client, config, journal, registry, makeFakeTreeState());
+
+  sdk.setResponder(() => ({ kind: "hang" }));
+  const pending = fanout.dispatch(readJob({ role: "skeptic", itemId: "hang" }));
+  await microtasks();
+
+  t.mock.timers.tick(5_000);
+  await microtasks();
+  await pending;
+  assert.equal(sdk.aborts.length, 1, "no block means no change in behaviour");
+});

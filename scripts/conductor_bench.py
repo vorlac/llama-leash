@@ -1944,6 +1944,11 @@ def build_conductor_cell_config(task: Task) -> Dict[str, Any]:
             # admission sizing with nothing to catch it.
             "maxReaders": conductor_wiring.DEFAULT_MAX_READERS,
             "subSessionTimeoutMs": conductor_wiring.SUB_SESSION_TIMEOUT_MS,
+            # Seeded explicitly, not left to the product default: a seeded
+            # config OVERRIDES the default entirely, so a value present here and
+            # absent there is the one the run gets, and a value improved there
+            # and not here never reaches a cell at all.
+            "roleTimeoutMs": dict(conductor_wiring.ROLE_TIMEOUT_MS),
         },
         "models": {"default": "", "roles": {}},
         "ponytail": "full",
