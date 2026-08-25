@@ -87,6 +87,9 @@ the failure handling, and the safe-by-default behavior as concrete steps.
       `TODO:` marker, no bare "add error handling", no "similar to task N", no
       `<placeholder>` standing in for real content, no "and so on". Each of these
       is rejected on sight and each one marks a decision you have not made yet.
+      The check reads these literal words, not the shape of them. Angle brackets
+      quoting the task's own specification are content, not a placeholder, and
+      pass. Do not spend a step deciding whether a quotation is safe.
 - [ ] Consequential forks record ≥ 2 options and a reasoned choice.
 - [ ] Security, validation, data-loss, and accessibility are handled explicitly.
 

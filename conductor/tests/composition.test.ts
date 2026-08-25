@@ -189,6 +189,7 @@ import { fileURLToPath } from "node:url";
 // ---- the subjects --------------------------------------------------------
 // config-io.ts does NOT exist at red time; this import is the missing-subject red.
 import { DEFAULT_CONFIG, configPath, loadConfig } from "../adapter/config-io.ts";
+import { planPrompt } from "../adapter/tools.ts";
 import type { LoadedConfig } from "../adapter/config-io.ts";
 // The plugin exists but exposes no `chat.message` at red time.
 import { ConductorPlugin } from "../plugin/index.ts";
@@ -1651,4 +1652,37 @@ test("[5.4a-tools-still-throw-scope-fence] every one of the 22 conductor tools i
       `${name} must NOT refuse with the handlerNotBound message any more — Task 13.1 bound it to its committed handler, and a tool that still throws it is a tool no live opencode session can use`,
     );
   }
+});
+
+// ---------------------------------------------------------------------------
+// The plan brief's claims about the handler must be claims the handler honours
+// ---------------------------------------------------------------------------
+
+// Measured, epoch 12: a planner spent part of a 15-minute watchdog reasoning
+// about whether quoting the task's own spec would trip the no-placeholder rule,
+// and was killed still deliberating. The rule was never at risk — core/planning.ts
+// matches the literal token, not the bracket shape — so the cost was not the rule
+// but the brief's silence about how the rule is checked.
+//
+// The same silence surrounds "decisions": the field is conditional on a
+// consequential fork existing, and nothing in the brief said an empty list is a
+// legal answer. Telling the planner it is only helps if it is TRUE, so this test
+// asserts the advice against the mechanism rather than against a second copy of
+// the advice. That is the D30 lesson: a remedy stated in a prompt and not checked
+// against the gate it describes is how one lost turn becomes two.
+test("plan brief: an empty decisions list is accepted by the schema, and the brief says so", () => {
+  const empty = validate("Plan", { markdown: "# plan\n\nstep 1: edit src/a.ts", decisions: [] });
+  assert.deepEqual(empty.errors, [], "the Plan schema must accept an empty decisions array");
+  assert.equal(empty.ok, true);
+
+  const brief = planPrompt(
+    "make slugify lowercase its input",
+    { items: [{ id: "a", title: "t", behavioral: true, fileScope: ["src/a.ts"], testScope: [], acceptance: ["x"], dependsOn: [] }] } as never,
+    { ponytail: "full" } as never,
+    { "plan.md": "## Self-check before returning\n\n- [ ] nothing\n" },
+  );
+  assert.match(brief, /EMPTY "decisions" is accepted/,
+    "the brief must state what the schema actually permits");
+  assert.match(brief, /do not spend a step deciding whether it may be empty/,
+    "and must say so in a way that closes the deliberation, not just permits the outcome");
 });

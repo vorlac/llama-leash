@@ -2335,7 +2335,9 @@ export function planPrompt(
     "the five criteria (capability, testability, movingParts, validationEarliness, " +
     'singleSource), plus the choice, the why, the kind ("derived" for anything derivable; ' +
     '"human" only for taste, money, irreversible commitments or secrets) and appliedWhere. A ' +
-    '"derived" fork carrying fewer than 2 scored options is rejected.\nPonytail intensity is "' +
+    '"derived" fork carrying fewer than 2 scored options is rejected. An EMPTY "decisions" is ' +
+    "accepted: a queue that presents no consequential fork records none. Do not invent a fork to " +
+    'fill the field, and do not spend a step deciding whether it may be empty.\nPonytail intensity is "' +
     config.ponytail +
     '" (§6.3).\n\nQUEUE:\n' +
     itemLines +
