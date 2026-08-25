@@ -60,7 +60,19 @@ export const FANOUT_WAVE = "wave";
 // it), never inventing one at the call site.
 export const EVENTS: Record<Component, readonly string[]> = {
   // §3.1 / §7.4: FSM transitions and refusals.
-  fsm: [FSM_TRANSITION, "refusal", FSM_GUARD_REJECT, "invalid-transition"],
+  //   check.redispatched — a stage re-rolled a CHECKER sub-session whose dispatch
+  //                        returned no valid receipt, keeping the artifact the
+  //                        checker was checking. Widened rather than borrowed:
+  //                        `fanout/retry` is the engine's OWN retry inside a single
+  //                        dispatch and is emitted by the engine, so filing a
+  //                        handler-level re-roll under it makes the two
+  //                        indistinguishable to a replay asking which layer
+  //                        recovered; `refusal` describes a call that FAILED and
+  //                        this one recovers; and guard-reject names a guard
+  //                        verdict, where no guard has spoken. data.kept carries
+  //                        the classification that survived, which is the whole
+  //                        point of the record (§7.4).
+  fsm: [FSM_TRANSITION, "refusal", FSM_GUARD_REJECT, "invalid-transition", "check.redispatched"],
   // §3.6 / §7.2 / §7.4: gate decisions (with their input snapshot at debug),
   // the §2.8 gate-crash anomaly, the budgeted override hatch, and — under the
   // widening rule at the foot of this file — the §3.4 tool call that every gate

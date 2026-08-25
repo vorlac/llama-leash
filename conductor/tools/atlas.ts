@@ -1154,6 +1154,16 @@ const FSM_ENGINE_NODES: readonly AtlasNode[] = [
           "A move off the diagram entirely. The `why` names the legal successors of the current state, " +
           "so this record tells you where the run CAN go.",
       },
+      {
+        component: "fsm",
+        event: "check.redispatched",
+        level: "warn",
+        means:
+          "A checker sub-session returned no valid receipt and the stage re-rolled it rather than " +
+          "discarding what it was checking. `kept` names the artifact that survived, `attempt` the " +
+          "roll, and `error` why the previous one produced nothing. Seeing this means the run paid " +
+          "for one extra checker and none of the work under it.",
+      },
     ],
   },
 ];

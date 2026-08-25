@@ -133,7 +133,7 @@ import type { OpenOptions, StateStore } from "../adapter/state.ts";
 import { appendQuestion, readQuestions } from "../adapter/questions.ts";
 import type { NewQuestion } from "../adapter/questions.ts";
 import { createFanout } from "../adapter/fanout.ts";
-import type { Fanout, TreeState } from "../adapter/fanout.ts";
+import type { Fanout, FanoutJob, FanoutResult, TreeState } from "../adapter/fanout.ts";
 import { legalTools } from "../core/gates-phase.ts";
 import type { GateItem, GateRun } from "../core/gates-phase.ts";
 import { validate, SCHEMAS } from "../core/types.ts";
@@ -1579,6 +1579,129 @@ test("[9.1-fix-surface-first-block-wins] a second surfaced question naming an al
       readQuestions(runDir).filter((x) => x.answeredIso === null).length,
       0,
       "both questions end answered — no question was stranded by the second surface",
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ===========================================================================
+// [9.1-classify-skeptic-redispatch] a checker's failure must not cost the
+// artifact it was checking
+// ===========================================================================
+
+// Measured, epoch 12 conductor/slugify-ts: the skeptic exhausted its 900s
+// watchdog, conductor_classify threw, and the phase gate's re-offer re-dispatched
+// BOTH roles — so a valid "trivial" Classification derived in 3m40s was discarded
+// and re-derived, identically, in 4m20s. The same skeptic prompt settled in 2m24s
+// on the retried round, so the deadline exhaustion was a slow roll, not a verdict.
+//
+// The roll worth repeating is the one that failed. This pins that the classifier
+// is dispatched ONCE across a skeptic failure — the property the throw destroyed.
+function fanoutWithFlakySkeptic(
+  classification: Classification,
+  check: ClassificationCheck,
+  skepticFailures: number,
+): { fanout: Fanout; roles: string[] } {
+  const roles: string[] = [];
+  let failuresLeft = skepticFailures;
+  const fanout: Fanout = {
+    async dispatch(job: FanoutJob): Promise<FanoutResult> {
+      roles.push(job.role);
+      const timings = { startedMs: 0, endedMs: 1, durationMs: 1 };
+      if (job.role === "skeptic" && failuresLeft > 0) {
+        failuresLeft -= 1;
+        // What the fan-out returns for a watchdog abort: no value, an env error.
+        return {
+          sessionID: "ses_dead",
+          error: { kind: "env", reason: "watchdog timeout: aborted hung sub-session after 900000ms" },
+          timings,
+        };
+      }
+      return {
+        sessionID: "ses_ok",
+        value: job.role === "skeptic" ? check : classification,
+        timings,
+      };
+    },
+    async dispatchWave(jobs: FanoutJob[]): Promise<FanoutResult[]> {
+      return Promise.all(jobs.map((j) => this.dispatch(j)));
+    },
+  };
+  return { fanout, roles };
+}
+
+test("[9.1-classify-skeptic-redispatch] one skeptic deadline exhaustion re-rolls the SKEPTIC only; the classifier's verdict survives and is used", async () => {
+  const root = scratchDir();
+  try {
+    const config = makeConfig({ trivialMaxFiles: 5, modelDefault: "test-model" });
+    const journal = makeJournal();
+    const store = openStore(root, journal.sink, config);
+    const runId = createIntakeRun(store);
+
+    const { fanout, roles } = fanoutWithFlakySkeptic(
+      makeClassification("trivial", makeTrivialItem()),
+      makeCheck(true, null, "agreed: one file, one function"),
+      1,
+    );
+
+    await handleClassify({ store, fanout, runId, config, journal: journal.sink, sessionID: "ses_orchestrator" });
+
+    const classifierDispatches = roles.filter((r) => r !== "skeptic").length;
+    assert.equal(
+      classifierDispatches,
+      1,
+      `the classifier is dispatched once and its verdict survives the skeptic's death; got roles ${JSON.stringify(roles)}`,
+    );
+    assert.equal(roles.filter((r) => r === "skeptic").length, 2, "the failed check is the roll that repeats");
+
+    const run = store.loadRun(runId);
+    assert.equal(run.classified, true, "the round completes rather than throwing");
+    assert.equal(run.classification.kind, "trivial", "the surviving classification is the one that was checked");
+
+    // The §7.4 widening is only worth its entry if a call site emits it. A recovery
+    // that leaves no record is indistinguishable from a check that never failed,
+    // and the whole value of the record is `kept` — which classification survived.
+    const redispatch = journal.records.filter((r) => r.event === "check.redispatched");
+    assert.equal(redispatch.length, 1, "the re-roll is journaled, once, under its own name");
+    assert.equal(redispatch[0].component, "fsm");
+    assert.equal(
+      (redispatch[0].data as { kept?: string }).kept,
+      "trivial",
+      "the record names the artifact that survived the checker's death",
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("[9.1-classify-skeptic-redispatch] the bound holds: a second deadline exhaustion is no longer a slow roll and still refuses", async () => {
+  const root = scratchDir();
+  try {
+    const config = makeConfig({ trivialMaxFiles: 5, modelDefault: "test-model" });
+    const journal = makeJournal();
+    const store = openStore(root, journal.sink, config);
+    const runId = createIntakeRun(store);
+
+    const { fanout, roles } = fanoutWithFlakySkeptic(
+      makeClassification("trivial", makeTrivialItem()),
+      makeCheck(true, null, "never reached"),
+      99,
+    );
+
+    await assert.rejects(
+      () => handleClassify({ store, fanout, runId, config, journal: journal.sink, sessionID: "ses_orchestrator" }),
+      /no valid ClassificationCheck/,
+      "an unbounded retry would hang the round instead of handing the failure back",
+    );
+    assert.equal(roles.filter((r) => r === "skeptic").length, 2, "exactly two attempts, then refuse");
+    // `classified` is OPTIONAL and unset at intake, so the receipt's absence reads
+    // as undefined rather than false. What matters is that it is not true: the
+    // phase gate keeps conductor_classify legal exactly while the flag is unset.
+    assert.notEqual(
+      store.loadRun(runId).classified,
+      true,
+      "a refused round leaves the receipt unset, so the phase gate re-offers classify",
     );
   } finally {
     rmSync(root, { recursive: true, force: true });

@@ -920,6 +920,11 @@ function skepticPrompt(userPrompt: string, proposed: ClassificationKind): string
   );
 }
 
+// How many times a skeptic dispatch is attempted before conductor_classify gives
+// up. The check is a second opinion on an artifact already in hand, so its failure
+// is the only roll worth repeating.
+const SKEPTIC_DISPATCH_ATTEMPTS = 2;
+
 // Dispatch a classifier (schema Classification) then a skeptic (schema
 // ClassificationCheck) through the injected Fanout; embed the check into
 // run.classification; escalate to the stricter kind on disagreement AND to `work` on
@@ -962,12 +967,45 @@ export async function handleClassify(input: ClassifyInput): Promise<ClassifyResu
     schemaName: "ClassificationCheck",
     priority: "interactive",
   };
-  const skepticResult = await fanout.dispatch(skepticJob);
-  const check = skepticResult.value as ClassificationCheck | undefined;
+  // The skeptic checks a classification the classifier has ALREADY produced, so a
+  // skeptic that returns nothing must not cost that classification. Throwing here
+  // fails the whole tool call, and the phase gate's re-offer re-dispatches BOTH
+  // roles: a valid Classification, derived and paid for, is discarded because a
+  // different sub-session ran out of wall clock.
+  //
+  // Measured (epoch 12, conductor/slugify-ts): the skeptic exhausted its 900s
+  // watchdog, the classifier's "trivial" verdict was thrown away, and the retried
+  // round re-derived the same verdict in 4m20s while the SAME skeptic prompt
+  // settled in 2m24s. A deadline exhaustion here is not a function of the prompt —
+  // which is the fan-out's own reason for treating a dispatch refusal as
+  // re-rollable — so the roll worth repeating is the one that failed, not the one
+  // that succeeded. Retrying in place is a strict subset of the work the throw
+  // path does.
+  //
+  // The bound is one extra attempt, and the throw below is still the floor: two
+  // deadline exhaustions on the same check are no longer plausibly a slow roll,
+  // and the outer re-offer remains as the last recovery.
+  let check: ClassificationCheck | undefined;
+  let skepticError: unknown;
+  for (let attempt = 1; attempt <= SKEPTIC_DISPATCH_ATTEMPTS; attempt += 1) {
+    const skepticResult = await fanout.dispatch(skepticJob);
+    check = skepticResult.value as ClassificationCheck | undefined;
+    if (check !== undefined) break;
+    skepticError = skepticResult.error;
+    if (attempt < SKEPTIC_DISPATCH_ATTEMPTS) {
+      journal.log(
+        "warn",
+        "fsm",
+        "check.redispatched",
+        { stage: "classify", attempt, kept: classification.kind, error: skepticError },
+        { runId, sessionID: input.sessionID },
+      );
+    }
+  }
   if (check === undefined) {
     throw new Error(
       "conductor_classify: the skeptic sub-session produced no valid ClassificationCheck (" +
-        JSON.stringify(skepticResult.error) +
+        JSON.stringify(skepticError) +
         ")",
     );
   }
