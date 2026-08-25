@@ -75,8 +75,11 @@ PAT_TRIV='assert\.ok\(true\)|assert\.equal\(1, ?1\)|expect\(true\)'
 PAT_CATCH='catch[[:space:]]*(\([^)]*\))?[[:space:]]*\{[[:space:]]*\}'
 
 # Line-level exemptions: `<path>|<scan>|<substring that must appear on the matched line>`.
-# Three modules in this repo are ABOUT unfinished-work markers, so a textual scan reads
-# their subject matter as their content. The exemption is per LINE, not per file — any
+# A few modules here are ABOUT unfinished-work markers, so a textual scan reads their
+# subject matter as their content. The fingerprint fixtures are the newest case: they
+# quote, verbatim, what a planner was thinking while deliberating over the doctrine's
+# no-placeholder rule, and the anchors below are the hedges that make those two lines the
+# corpus. Rewording them to dodge the scan would destroy the sample. The exemption is per LINE, not per file — any
 # OTHER marker in the same file still fails — and every entry is verified to still match
 # something below, so an exemption cannot quietly outlive the line it was written for.
 EXEMPT=(
@@ -86,6 +89,8 @@ EXEMPT=(
   'conductor/core/planning.ts|STUB|"placeholder for the real X", "as a placeholder"'
   'conductor/core/planning.ts|STUB|pattern: /<placeholder>|\[placeholder\]'
   'conductor/tests/tools-9.4b.test.ts|CATCH|catch (_) {} process.exit(3);'
+  'scripts/test_reasoning_fingerprints.py|STUB|Careful: the acceptance format string'
+  'scripts/test_reasoning_fingerprints.py|STUB|Hmm, the self-check rejects a'
 )
 # Emit the scan's matches for one file, dropping any line an exemption covers.
 # $1=file $2=scan-name $3=grep flags $4=pattern
