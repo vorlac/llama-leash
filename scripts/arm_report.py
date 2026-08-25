@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -34,6 +35,36 @@ ARM_BLURB = {
 
 # Directories that are harness furniture rather than the model's work.
 SKIP_DIRS = {".git", ".conductor", "node_modules", "__pycache__", ".opencode"}
+
+# How far a cell tree's creation may sit from its result's startedIso before the
+# two are judged to belong to different runs.
+#
+# run_and_watch.py clears the work root at the START of every epoch, so the trees
+# on disk always belong to the MOST RECENT run while a results directory can name
+# any earlier one. Pairing them renders a comparison that never happened, and it
+# looks entirely plausible: correct wall clock from the result beside source and
+# token counts from a different epoch. The report refuses that pairing rather than
+# printing it.
+STALE_TREE_TOLERANCE_S = 3600.0
+
+
+def tree_matches_result(cell: Path, record: Optional[dict]) -> bool:
+    """Whether this on-disk cell belongs to the run that produced `record`."""
+    if record is None:
+        return False
+    started = record.get("startedIso")
+    if not isinstance(started, str) or not started:
+        return False
+    try:
+        began = datetime.fromisoformat(started.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return False
+    try:
+        stat = cell.stat()
+    except OSError:
+        return False
+    born = getattr(stat, "st_birthtime", stat.st_mtime)
+    return abs(born - began) <= STALE_TREE_TOLERANCE_S
 
 
 def source_files(root: Path, include_gauge: bool = False) -> Dict[str, str]:
@@ -75,8 +106,10 @@ def load_results(results_dir: Path) -> Dict[Tuple[str, str], dict]:
     return found
 
 
-def generated_tokens(cell: Path) -> Optional[int]:
-    """The cell's emitted-token count, or None if the session store is gone."""
+def generated_tokens(cell: Path, record: Optional[dict]) -> Optional[int]:
+    """The cell's emitted-token count, or None if it is gone or from another run."""
+    if not tree_matches_result(cell, record):
+        return None
     if not (cell / "home/data/opencode/opencode.db").exists():
         return None
     try:
@@ -169,8 +202,10 @@ def render(tasks: List[dict], work_root: Path, results_dir: Path, model: str,
         # The hidden gauge, read from any arm's tree (identical across arms).
         gauge: Dict[str, str] = {}
         for arm in ARMS:
-            cell = work_root / model / mechanism / arm / tid / rep / "repo"
-            g = {k: v for k, v in source_files(cell, include_gauge=True).items()
+            cell = work_root / model / mechanism / arm / tid / rep
+            if not tree_matches_result(cell, results.get((arm, tid))):
+                continue
+            g = {k: v for k, v in source_files(cell / "repo", include_gauge=True).items()
                  if k.startswith("gauge/")}
             if g:
                 gauge = g
@@ -188,11 +223,17 @@ def render(tasks: List[dict], work_root: Path, results_dir: Path, model: str,
             cell = work_root / model / mechanism / arm / tid / rep
             record = results.get((arm, tid))
             w(f"\n## `{arm}` — {ARM_BLURB[arm]}\n")
-            w(outcome_line(record, generated_tokens(cell)) + "\n")
+            w(outcome_line(record, generated_tokens(cell, record)) + "\n")
 
+            if not tree_matches_result(cell, record):
+                w("_No tree for this run. `run_and_watch.py` clears the work root at the start "
+                  "of every epoch, so only the most recent run's trees survive — and pairing "
+                  "these results with what is on disk would render a comparison that never "
+                  "happened._\n")
+                continue
             produced = source_files(cell / "repo")
             if not produced:
-                w("_No tree on disk — the work root was cleared._\n")
+                w("_The cell directory exists but holds no source._\n")
                 continue
             changed = {p: b for p, b in produced.items()
                        if p not in seeds or seeds[p] != b}

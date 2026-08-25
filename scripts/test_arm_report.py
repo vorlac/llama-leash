@@ -7,12 +7,12 @@ not be presented as its work, and an arm that produced nothing must SAY so rathe
 than render an empty section a reader will read as "no diff shown".
 """
 
-import json
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
-from arm_report import outcome_line, source_files
+from arm_report import STALE_TREE_TOLERANCE_S, outcome_line, source_files, tree_matches_result
 
 
 class SourceFilesTest(unittest.TestCase):
@@ -82,3 +82,44 @@ class OutcomeLineTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StaleTreeTest(unittest.TestCase):
+    """The report must refuse to pair a result with another run's tree.
+
+    run_and_watch.py clears the work root at the START of every epoch, so the
+    trees on disk always belong to the most recent run while a results directory
+    can name any earlier one. The first version of this report happily paired
+    them: epoch 12's wall clock beside epoch 13's source and token count, on one
+    line, entirely plausible. A review artifact that shows the wrong code is worse
+    than no review artifact.
+    """
+
+    def _cell(self, tmp):
+        cell = Path(tmp) / "r1"
+        (cell / "repo").mkdir(parents=True)
+        return cell
+
+    def test_a_tree_born_with_its_result_matches(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cell = self._cell(tmp)
+            born = cell.stat().st_birthtime if hasattr(cell.stat(), "st_birthtime") else cell.stat().st_mtime
+            started = datetime.fromtimestamp(born, tz=timezone.utc).isoformat()
+            self.assertTrue(tree_matches_result(cell, {"startedIso": started}))
+
+    def test_a_tree_from_another_epoch_does_not(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cell = self._cell(tmp)
+            stale = datetime.fromtimestamp(0, tz=timezone.utc).isoformat()
+            self.assertFalse(tree_matches_result(cell, {"startedIso": stale}))
+
+    def test_the_tolerance_spans_a_long_cell_but_not_a_later_epoch(self):
+        """A 60-minute T2 cell starts well before it ends; an epoch is hours."""
+        self.assertGreaterEqual(STALE_TREE_TOLERANCE_S, 3600.0)
+
+    def test_a_missing_tree_or_an_unusable_timestamp_never_matches(self):
+        self.assertFalse(tree_matches_result(Path("/nonexistent/r1"), {"startedIso": "2026-01-01T00:00:00Z"}))
+        with tempfile.TemporaryDirectory() as tmp:
+            cell = self._cell(tmp)
+            for record in (None, {}, {"startedIso": ""}, {"startedIso": "not a date"}):
+                self.assertFalse(tree_matches_result(cell, record), record)
