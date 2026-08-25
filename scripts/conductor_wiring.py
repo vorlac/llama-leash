@@ -78,9 +78,17 @@ SUB_SESSION_TIMEOUT_MS = 900000
 #   mechanical     25    3m29        6m10     3 (11%)
 #   skeptic        22    2m24        8m27     3 (12%)
 #   planner        28    7m48       13m38    18 (39%)
+# Every value here must stay STRICTLY ABOVE ROUTER_QUEUE_TIMEOUT_MS for the
+# reason that constant's own comment gives: a queue timeout must report as itself
+# rather than racing a sub-session watchdog to the same instant. A 2026-08-12
+# review of the plan flagged exactly that collision when the two numbers were
+# equal — "two different error stories for one event" — and the first cut of this
+# map put mechanical and skeptic at 600000, the queue timeout to the millisecond.
+# 720000 keeps 40% headroom over the slowest measured skeptic success (8m27) and
+# is still three minutes better than the 900000 it replaces.
 ROLE_TIMEOUT_MS = {
-    "mechanical": 600000,
-    "skeptic": 600000,
+    "mechanical": 720000,
+    "skeptic": 720000,
     "planner": 1200000,
 }
 

@@ -574,7 +574,7 @@ const DOCUMENTED_DEFAULT_CONFIG: Config = {
     subSessionTimeoutMs: 900000,
     // Measured per-role deadlines. The global above remains the fallback for
     // every role with no measurement behind it, which is why it is unchanged.
-    roleTimeoutMs: { mechanical: 600000, skeptic: 600000, planner: 1200000 },
+    roleTimeoutMs: { mechanical: 720000, skeptic: 720000, planner: 1200000 },
   },
   models: { default: "", roles: {} },
   toolSurface: { classifyBuiltins: true, denyNetwork: true },

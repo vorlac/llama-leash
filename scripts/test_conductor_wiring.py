@@ -2960,3 +2960,39 @@ class ServeMainServedLimit(ServeMainCase):
         self.assertEqual(models[P12_MODEL_A]["limit"], {"context": 4096, "output": 1024})
         argv = self.spawned[0]["argv"]
         self.assertEqual(argv[argv.index("--ctx-size") + 1], str(4096 * cw.derive_slots(cw.DEFAULT_MAX_READERS)))
+
+
+class RoleTimeoutInvariantTests(unittest.TestCase):
+    """Every sub-session deadline must outlast the router's queue wait.
+
+    ROUTER_QUEUE_TIMEOUT_MS's own comment states the rule: a queue timeout must
+    report as itself rather than racing a sub-session watchdog. A 2026-08-12
+    review of the plan flagged the collision by name when the two numbers were
+    equal — "two different error stories for one event" — and the first cut of
+    the per-role map reintroduced it exactly, putting mechanical and skeptic at
+    the queue timeout to the millisecond.
+
+    The invariant is about the MINIMUM of the map, not the global fallback: a
+    per-role value below the queue wait breaks it however generous the global is.
+    """
+
+    def test_every_role_deadline_outlasts_the_router_queue_wait(self):
+        queue_ms = cw.ROUTER_QUEUE_TIMEOUT_MS
+        for role, timeout_ms in cw.ROLE_TIMEOUT_MS.items():
+            self.assertGreater(
+                timeout_ms,
+                queue_ms,
+                "role %r has a %dms deadline against a %dms queue wait: a request that "
+                "waits out the queue and a watchdog that fires would land at the same "
+                "instant, and the run gets two explanations for one failure"
+                % (role, timeout_ms, queue_ms),
+            )
+
+    def test_the_global_fallback_also_outlasts_it(self):
+        self.assertGreater(
+            cw.SUB_SESSION_TIMEOUT_MS,
+            cw.ROUTER_QUEUE_TIMEOUT_MS,
+        )
+
+    def test_the_map_is_not_empty_so_the_invariant_is_not_vacuous(self):
+        self.assertGreater(len(cw.ROLE_TIMEOUT_MS), 0)

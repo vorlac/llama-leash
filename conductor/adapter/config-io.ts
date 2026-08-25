@@ -72,9 +72,13 @@ const SUB_SESSION_TIMEOUT_MS = 900000;
 // before anything retries, which is what cost one measured T0 cell its budget.
 // Lowering those two is not a tightening, it is recovering sooner from a
 // sub-session that is already lost.
+// Every value must stay STRICTLY ABOVE the router's admission queueTimeoutMs
+// (scripts/conductor_wiring.py ROUTER_QUEUE_TIMEOUT_MS, 600000), so a queue
+// timeout reports as itself instead of racing a sub-session watchdog to the same
+// instant and producing two error stories for one event.
 const ROLE_TIMEOUT_MS: Record<string, number> = {
-  mechanical: 600000,
-  skeptic: 600000,
+  mechanical: 720000,
+  skeptic: 720000,
   planner: 1200000,
 };
 
