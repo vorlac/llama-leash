@@ -434,10 +434,65 @@ function namesAnArtifact(criterion: string): boolean {
   return clauseTokens(criterion).some((token) => nameMarked(token));
 }
 
+// English glue. A restatement test asks whether the criterion's SUBJECT
+// reappears after the preservation verb, and these words reappear after
+// everything, so admitting them would make "the queue stays drained while the
+// daemon runs" preserve a queue it is actually being asked to drain. The corpus
+// in planning-clusters.test.ts is what settles whether this list is right.
+// One space-separated string rather than a list of individually quoted words.
+// A quoted list puts a module-specifier keyword next to a quoted token, which a
+// line-based import scanner cannot distinguish from a real static import, and
+// conductor/tests/purity.test.ts is right to flag what it sees. The scanner is
+// not the thing to loosen; the data is the thing to write differently.
+const FUNCTION_WORDS = new Set(
+  (
+    "the and but for nor yet its it's that this these those with from when while after before " +
+    "each every all any are was were has have had not into than then over under upon per via " +
+    "one two same still also only just does did can may will must should would shall might " +
+    "both such other which what where there their you your our his her them been being stays " +
+    "stay remains remain"
+  ).split(" "),
+);
+
+// The preservation verbs that take a restated object rather than a sameness word.
+const RESTATEMENT_VERB = /\b(?:stays?|remains?)\b/i;
+
+/**
+ * Preservation stated by RESTATEMENT: "the export remains export function
+ * slugify(input: string): string".
+ *
+ * The verb is already preservation vocabulary; what defeats the sameness-word
+ * row above is the OBJECT — a declaration written out where the row expects
+ * "unchanged". A planner that writes the signature is making the most precise
+ * non-regression promise available to it, and charging it a second cluster for
+ * the precision is backwards.
+ *
+ * The admitting rule is not "remains anything", which would swallow a budget
+ * the item must go and meet. It is that a content word before the verb
+ * REAPPEARS after it: asserting X remains X preserves X however the second X is
+ * spelled, while "the cache remains under 100MB" introduces a subject the
+ * criterion did not already name.
+ *
+ * Measured: this shape refused a four-line string function four times,
+ * byte-identically, and once the decompose brief carried the source (so the
+ * read cost was gone) each refusal bought a whole extra planner dispatch —
+ * about a fifth of a T0 budget.
+ */
+function restatesItsSubject(criterion: string): boolean {
+  const verb = RESTATEMENT_VERB.exec(criterion);
+  if (verb === null) return false;
+  const words = (text: string): string[] =>
+    (text.toLowerCase().match(/[a-z_][\w.]{2,}/g) ?? []).filter((w) => !FUNCTION_WORDS.has(w));
+  const subject = new Set(words(criterion.slice(0, verb.index)));
+  if (subject.size === 0) return false;
+  return words(criterion.slice(verb.index + verb[0].length)).some((w) => subject.has(w));
+}
+
 /** Whether a criterion promises that something does NOT change. */
 function preservationClaim(criterion: string): boolean {
   if (ADVERSATIVE.test(criterion)) return false;
   if (PRESERVATION_CLAIMS.some((pattern) => pattern.test(criterion))) return true;
+  if (restatesItsSubject(criterion)) return true;
   if (!ARTIFACT_PRESERVATION_CLAIMS.some((pattern) => pattern.test(criterion))) return false;
   return namesAnArtifact(criterion);
 }

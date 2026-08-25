@@ -857,3 +857,81 @@ test("[vague-acceptance-identifier-is-not-a-verb] a criterion whose subject is a
     assert.notEqual(vagueAcceptance(criterion), null, `"${criterion}" is still a wish, not a check`);
   }
 });
+
+// ---------------------------------------------------------------------------
+// cause 8 — preservation stated by RESTATEMENT rather than by a sameness word
+// ---------------------------------------------------------------------------
+
+// A planner writing "the export remains export function slugify(input: string):
+// string" is promising not to change a signature, in the most precise way
+// available to it: by writing the signature out. The verb is preservation
+// vocabulary; only the object defeats the guard, because it is a declaration
+// where the row expects "unchanged".
+//
+// The rule that admits it is not "remains anything" — that would swallow a
+// constraint being delivered. It is that the SUBJECT REAPPEARS IN THE PREDICATE.
+// Asserting X remains X preserves X however the second X is spelled; asserting
+// the cache remains under 100MB names a budget the item must go and meet.
+test("[cluster-guard-restates-what-it-preserves] a criterion that preserves an artifact by writing it out is a guard, while one whose predicate introduces a new subject is still a deliverable", () => {
+  const guards: ReadonlyArray<{ why: string; scope: string; acceptance: string[] }> = [
+    { why: "a signature written out", scope: "src/slugify.ts", acceptance: ["slugify('Hello, World!') === 'hello-world'", "The export remains export function slugify(input: string): string"] },
+    { why: "a name restated", scope: "src/level.ts", acceptance: ["levelFor(3) === 2", "the levelFor export stays levelFor"] },
+    { why: "a module path restated", scope: "src/parse.py", acceptance: ["parse('') returns None", "the import remains from src.parse import parse"] },
+  ];
+  for (const row of guards) {
+    const subject = item({ fileScope: [row.scope], testScope: ["tests/t.test.ts"], acceptance: row.acceptance });
+    assert.deepEqual(
+      clusterViolations(subject),
+      [],
+      `${row.why}: restating the artifact preserves it, so the item is still one thing — got ${JSON.stringify(clustersOf(subject))}`,
+    );
+  }
+
+  // The boundary. Each predicate introduces a subject the criterion does not
+  // already name, so each is work to go and do, not a promise to leave alone.
+  const deliverables: ReadonlyArray<[string, string]> = [
+    ["the cache remains under 100MB after a thousand calls", "a budget to meet"],
+    ["the queue stays drained while the daemon runs", "a runtime property to establish"],
+    ["the retry count remains below the configured ceiling", "a bound to enforce"],
+  ];
+  for (const [criterion, why] of deliverables) {
+    const paired = item({ acceptance: ["slugify lowercases the input", criterion] });
+    assert.notDeepEqual(
+      clusterViolations(paired),
+      [],
+      `"${criterion}" delivers ${why}, so pairing it with a second subject is still two things; got ${JSON.stringify(clustersOf(paired))}`,
+    );
+  }
+});
+
+// ---------------------------------------------------------------------------
+// regression corpus — the Task 9.2 defect class, pinned
+// ---------------------------------------------------------------------------
+
+// Task 9.2's pre-commit review found that "acceptance clustering broke on any
+// criterion beginning with 'the'" (docs/developer/project-status.md). The
+// restatement rule above re-enters that neighbourhood: it asks whether a word
+// recurs across a preservation verb, and "the" recurs across everything. Its
+// first cut did break exactly this way, on `the queue stays drained while the
+// daemon runs`, and only a boundary row caught it.
+//
+// These rows exist so the next widening of this function cannot reintroduce the
+// defect quietly. Every criterion begins with "the"; the count is what it would
+// be if the leading article were absent.
+test("[cluster-leading-article-is-not-a-subject] criteria beginning with 'the' cluster by their subjects, so the article neither merges two things nor splits one", () => {
+  const pairs: ReadonlyArray<{ acceptance: string[]; want: number; why: string }> = [
+    { want: 2, why: "two subjects", acceptance: ["the parser rejects an empty document", "the router dispatches a matched route"] },
+    { want: 2, why: "two budgets to meet, not guards", acceptance: ["the cache remains under 100MB", "the queue stays drained while the daemon runs"] },
+    { want: 2, why: "encoder and decoder are two", acceptance: ["the encoder emits base64", "the decoder accepts base64url"] },
+    { want: 2, why: "a bound and a behaviour", acceptance: ["the retry count remains below the ceiling", "the backoff doubles each attempt"] },
+    { want: 1, why: "a restatement guard beside one deliverable counts only the deliverable", acceptance: ["the export remains export function a(): void", "the parser rejects an empty document"] },
+  ];
+  for (const row of pairs) {
+    const subject = item({ fileScope: ["src/a.ts"], testScope: ["tests/v.test.ts"], acceptance: row.acceptance });
+    assert.equal(
+      clustersOf(subject).length,
+      row.want,
+      `${row.why}: expected ${String(row.want)} cluster(s) from ${JSON.stringify(row.acceptance)}, got ${JSON.stringify(clustersOf(subject))}`,
+    );
+  }
+});
