@@ -533,6 +533,43 @@ class CellInvocation(NamedTuple):
 # ---------------------------------------------------------------------------
 
 
+
+# Prose fields whose only line breaks are the two-character sequence backslash-n
+# are JSON-escaped text that was never unescaped. The model reads them verbatim,
+# so a six-bullet requirement list arrives as one line of visible escapes.
+#
+# Measured: 13 of this corpus's tasks shipped a prompt and a README in that state,
+# and every arm read them that way for thirteen epochs. It biases no comparison —
+# all arms get the same text — but it makes a task harder to parse than its author
+# wrote it, and nothing surfaced it because the turns files truncate and JSON
+# escaping hides it in an editor.
+#
+# The rule is narrow ON PURPOSE. A source file may legitimately contain the same
+# two characters inside a string literal, so only PROSE is checked: the prompt and
+# any README. A prose field carrying escapes and no real line break is a defect;
+# the same escapes beside real line breaks are content.
+ESCAPED_NEWLINE = "\\n"
+
+
+def escaped_prose_fields(entry: Any) -> List[str]:
+    """Names of this task entry's prose fields that carry only escaped newlines."""
+    if not isinstance(entry, dict):
+        return []
+    found: List[str] = []
+    candidates: List[Tuple[str, Any]] = [("prompt", entry.get("prompt"))]
+    seeds = entry.get("seedFiles")
+    if isinstance(seeds, dict):
+        for path, body in sorted(seeds.items()):
+            if path.rsplit("/", 1)[-1].lower() == "readme.md":
+                candidates.append(("seedFiles[%s]" % path, body))
+    for name, value in candidates:
+        if not isinstance(value, str) or not value:
+            continue
+        if ESCAPED_NEWLINE in value and "\n" not in value:
+            found.append(name)
+    return found
+
+
 def load_manifest(
     path: Any,
     expected_counts: Optional[Dict[str, int]] = None,
@@ -618,6 +655,14 @@ def load_manifest(
     tasks: List[Task] = []
     seen: Dict[str, int] = {}
     for index, entry in enumerate(entries):
+        escaped = escaped_prose_fields(entry)
+        if escaped:
+            raise BenchError(
+                "%s: task %r carries escaped newlines in %s — the model reads these "
+                "verbatim, so the text arrives as one line of visible backslash-n. "
+                "Unescape them in the manifest."
+                % (manifest_path, entry.get("id", "?"), ", ".join(escaped))
+            )
         task = _parse_task(entry, index, tier_timeouts, base_root)
         if task.id in seen:
             raise BenchError(

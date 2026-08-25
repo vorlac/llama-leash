@@ -5385,3 +5385,73 @@ class CalibrationRepsTests(unittest.TestCase):
                 [(SENTINEL_MODEL, cb.DEFAULT_CAPABILITY, self.tasks)],
                 arms=["conductor"], reps=1, calibration_reps=2,
             )
+
+
+class EscapedProseTests(unittest.TestCase):
+    """A prose field whose only line breaks are the literal two characters.
+
+    Thirteen tasks shipped a prompt and a README in that state, and every arm
+    read them verbatim for thirteen epochs: a six-bullet requirement list
+    arriving as one line of visible backslash-n. It biased no comparison — all
+    arms get the same text — but it made those tasks harder to parse than their
+    author wrote them, and nothing surfaced it because the observed-turns files
+    truncate and JSON escaping hides it in an editor.
+    """
+
+    def test_a_prompt_with_only_escaped_breaks_is_a_defect(self):
+        entry = {"id": "t", "prompt": "Do this:\\n- one\\n- two"}
+        self.assertEqual(cb.escaped_prose_fields(entry), ["prompt"])
+
+    def test_a_readme_seed_is_checked_and_other_seeds_are_not(self):
+        """A source file may hold the same two characters in a string literal."""
+        entry = {
+            "id": "t",
+            "prompt": "fine",
+            "seedFiles": {
+                "README.md": "# t\\n\\nOne line.",
+                "src/a.py": 'print("a\\nb")',
+                "docs/README.md": "# nested\\n\\nAlso prose.",
+            },
+        }
+        self.assertEqual(
+            cb.escaped_prose_fields(entry),
+            ["seedFiles[README.md]", "seedFiles[docs/README.md]"],
+        )
+
+    def test_escapes_BESIDE_real_line_breaks_are_content(self):
+        """The narrow rule: only a field with NO real break is malformed."""
+        entry = {
+            "id": "t",
+            "prompt": "Real\nbreaks, and a quoted \\n inside.",
+            "seedFiles": {"README.md": "# t\n\nA \\n shown as an example.\n"},
+        }
+        self.assertEqual(cb.escaped_prose_fields(entry), [])
+
+    def test_clean_and_degenerate_entries_report_nothing(self):
+        self.assertEqual(cb.escaped_prose_fields({"id": "t", "prompt": "One line, no breaks."}), [])
+        self.assertEqual(cb.escaped_prose_fields({"id": "t"}), [])
+        self.assertEqual(cb.escaped_prose_fields({"id": "t", "prompt": ""}), [])
+        self.assertEqual(cb.escaped_prose_fields("not a dict"), [])
+
+    def test_the_shipped_manifest_is_clean(self):
+        """The corpus itself, so a re-introduction fails here and not in a run."""
+        manifest = json.loads(Path(cb.MANIFEST_PATH).read_text())
+        offenders = {
+            t.get("id"): cb.escaped_prose_fields(t)
+            for t in manifest["tasks"]
+            if cb.escaped_prose_fields(t)
+        }
+        self.assertEqual(offenders, {}, "bench/conductor-tasks.json carries escaped prose")
+
+    def test_load_manifest_refuses_rather_than_running_the_corpus(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bad = Path(tmp) / "m.json"
+            manifest = json.loads(Path(cb.MANIFEST_PATH).read_text())
+            manifest["tasks"] = manifest["tasks"][:1]
+            manifest["tasks"][0]["prompt"] = "Do this:\\n- one"
+            manifest.pop("expectedTaskCounts", None)
+            manifest.pop("taskCounts", None)
+            bad.write_text(json.dumps(manifest))
+            with self.assertRaises(cb.BenchError) as caught:
+                cb.load_manifest(str(bad))
+            self.assertIn("escaped newlines", str(caught.exception))

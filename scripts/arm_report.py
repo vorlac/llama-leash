@@ -150,8 +150,48 @@ def outcome_line(record: Optional[dict], tokens: Optional[int]) -> str:
     return " · ".join(bits)
 
 
+def render_history(watch_root: Path, all_tasks: List[dict]) -> str:
+    """Every epoch's outcome for every (task, arm), oldest first.
+
+    The produced trees do not survive — run_and_watch.py clears the work root at
+    the start of each run — but the scored RESULTS do, for every epoch ever run.
+    This table is therefore the complete record of what happened, and the source
+    comparison below it is the most recent run only.
+    """
+    epochs = sorted(d for d in watch_root.iterdir() if d.is_dir())
+    known = [t["id"] for t in all_tasks]
+    out: List[str] = []
+    w = out.append
+    w("## Every run, every arm\n")
+    w(f"{len(epochs)} epochs on disk. `p` pass · `f` fail · `T` timed out · `–` not in that run.\n")
+    header = "| epoch | task | " + " | ".join(f"`{a}`" for a in ARMS) + " |"
+    w(header)
+    w("|---|---|" + "---|" * len(ARMS))
+    for epoch in epochs:
+        results = load_results(epoch)
+        if not results:
+            continue
+        ran = [t for t in known if any((a, t) in results for a in ARMS)]
+        for i, tid in enumerate(ran):
+            cells = []
+            for arm in ARMS:
+                r = results.get((arm, tid))
+                if r is None:
+                    cells.append("–")
+                elif r.get("timedOut"):
+                    cells.append("**T**")
+                elif r.get("passed"):
+                    cells.append("p")
+                else:
+                    cells.append("f")
+            label = epoch.name if i == 0 else ""
+            w(f"| {label} | `{tid}` | " + " | ".join(cells) + " |")
+    w("")
+    return "\n".join(out)
+
+
 def render(tasks: List[dict], work_root: Path, results_dir: Path, model: str,
-           mechanism: str, rep: str) -> str:
+           mechanism: str, rep: str, history: str = "") -> str:
     results = load_results(results_dir)
     out: List[str] = []
     w = out.append
@@ -164,7 +204,9 @@ def render(tasks: List[dict], work_root: Path, results_dir: Path, model: str,
         w(f"- **`{arm}`** — {ARM_BLURB[arm]}")
     w("")
 
-    w("## Scoreboard\n")
+    if history:
+        w(history)
+    w("## This run's scoreboard\n")
     w("| task | " + " | ".join(f"`{a}`" for a in ARMS) + " |")
     w("|---|" + "---|" * len(ARMS))
     for task in tasks:
@@ -261,6 +303,8 @@ def main() -> int:
     ap.add_argument("--model", default="llamacpp-qwen3.8-27b")
     ap.add_argument("--mechanism", default="none")
     ap.add_argument("--rep", default="r1")
+    ap.add_argument("--history-root", type=Path, default=None,
+                    help="the watch/ directory; adds a table of every epoch ever run")
     args = ap.parse_args()
 
     manifest = json.loads(args.manifest.read_text())
@@ -272,8 +316,9 @@ def main() -> int:
         return 1
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
+    history = render_history(args.history_root, all_tasks) if args.history_root else ""
     args.out.write_text(render(tasks, args.work_root, args.results_dir,
-                               args.model, args.mechanism, args.rep))
+                               args.model, args.mechanism, args.rep, history))
     print(f"{args.out}  ({args.out.stat().st_size:,} bytes, {len(tasks)} task(s))")
     return 0
 
