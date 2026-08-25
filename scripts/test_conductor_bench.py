@@ -5455,3 +5455,69 @@ class EscapedProseTests(unittest.TestCase):
             with self.assertRaises(cb.BenchError) as caught:
                 cb.load_manifest(str(bad))
             self.assertIn("escaped newlines", str(caught.exception))
+
+
+class ArchiveCellTreeTests(unittest.TestCase):
+    """Copy a finished cell's code out before the next run destroys it.
+
+    run_and_watch.py clears the work root at the START of every run. Twelve
+    epochs of generated solutions were lost that way before anyone asked to read
+    one, and they are not recoverable — re-running an older commit answers a
+    different question, because the model is not deterministic.
+    """
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="cbench-archive-"))
+        self.addCleanup(shutil.rmtree, str(self.tmp), True)
+        self.cell = cb.Cell(SENTINEL_MODEL, cb.DEFAULT_CAPABILITY, "conductor", "slugify-ts", 1)
+
+    def _work(self):
+        work = self.tmp / "work"
+        (work / "repo" / "src").mkdir(parents=True)
+        (work / "repo" / "src" / "slugify.ts").write_text("export const x = 1;\n")
+        (work / "repo" / ".git").mkdir()
+        (work / "repo" / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+        (work / "repo" / "node_modules").mkdir()
+        (work / "repo" / "node_modules" / "big.js").write_text("x" * 5000)
+        (work / "home" / "data" / "opencode").mkdir(parents=True)
+        (work / "home" / "data" / "opencode" / "opencode.db").write_text("sqlite")
+        (work / "home" / "cache").mkdir(parents=True)
+        (work / "home" / "cache" / "huge.bin").write_text("y" * 5000)
+        return work
+
+    def test_the_produced_code_and_the_session_store_are_kept(self):
+        work = self._work()
+        cb.archive_cell_tree(self.tmp / "trees", self.cell, work)
+        stem = self.cell.cell_id.replace("/", "__")
+        root = self.tmp / "trees" / stem
+        self.assertEqual((root / "repo" / "src" / "slugify.ts").read_text(), "export const x = 1;\n")
+        self.assertEqual((root / "session" / "opencode.db").read_text(), "sqlite")
+
+    def test_the_bulk_that_makes_a_cell_157MB_is_not_kept(self):
+        """A cell is ~157MB; the repo is ~292KB and the session store ~2MB."""
+        work = self._work()
+        cb.archive_cell_tree(self.tmp / "trees", self.cell, work)
+        root = self.tmp / "trees" / self.cell.cell_id.replace("/", "__")
+        self.assertFalse((root / "repo" / "node_modules").exists(), "node_modules is not the model's work")
+        self.assertFalse((root / "repo" / ".git").exists(), "the seed commit is reconstructible")
+        self.assertFalse((root / "home").exists(), "only the session store is taken from home/")
+
+    def test_it_is_off_unless_a_directory_is_given(self):
+        self.assertEqual(cb.archive_cell_tree(None, self.cell, self._work()), [])
+
+    def test_a_missing_source_is_skipped_rather_than_raised_on(self):
+        """A cell that died before seeding still has to be scored."""
+        bare = self.tmp / "empty"
+        bare.mkdir()
+        self.assertEqual(cb.archive_cell_tree(self.tmp / "trees", self.cell, bare), [])
+
+    def test_re_archiving_replaces_rather_than_merging(self):
+        """A stale file from a previous archive would read as this run's output."""
+        work = self._work()
+        dest = self.tmp / "trees"
+        cb.archive_cell_tree(dest, self.cell, work)
+        root = dest / self.cell.cell_id.replace("/", "__")
+        (root / "repo" / "src" / "ghost.ts").write_text("from an earlier run")
+        cb.archive_cell_tree(dest, self.cell, work)
+        self.assertFalse((root / "repo" / "src" / "ghost.ts").exists())
+        self.assertTrue((root / "repo" / "src" / "slugify.ts").exists())

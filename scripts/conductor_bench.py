@@ -2146,6 +2146,7 @@ def run_cell(
     test_runner: Optional[Callable[[Sequence[str], Any, float], CommandOutcome]] = None,
     git_runner: Optional[Callable[[Sequence[str], Any], None]] = None,
     artifacts_dir: Optional[Any] = None,
+    archive_dir: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """Execute one cell end to end and return its pinned result record.
 
@@ -2324,6 +2325,10 @@ def run_cell(
     # Written here rather than returned, so the result record keeps exactly the
     # pinned field set and no caller has to remember to strip anything.
     write_cell_artifacts(artifacts_dir, cell, trace, ledger_slice(ledger, ledger_before))
+    # After scoring, so the archived tree is the one that was measured — and after
+    # the hidden files are materialized, so the gauge travels with the code it
+    # judged rather than having to be reconstructed from the manifest.
+    archive_cell_tree(archive_dir, cell, directory)
     return result
 
 
@@ -2521,6 +2526,55 @@ def summarize_ledger_window(ledger_path: Any, start_line: int) -> Dict[str, Any]
 # ---------------------------------------------------------------------------
 # Process metrics
 # ---------------------------------------------------------------------------
+
+
+
+# What a cell leaves behind that is worth keeping, and where it lives under the
+# cell's work directory. Everything else in a cell is the opencode install: a
+# cell is ~157MB, of which the repo is ~292KB and the session store ~2MB.
+ARCHIVED_CELL_PATHS = (("repo", "repo"), ("home/data/opencode", "session"))
+
+
+def archive_cell_tree(
+    archive_dir: Optional[Any],
+    cell: "Cell",
+    work_dir: Any,
+) -> List[str]:
+    """Copy a finished cell's produced tree and session store out of the work root.
+
+    run_and_watch.py clears the work root at the START of every run, so without
+    this the previous epoch's generated code is destroyed the moment the next one
+    launches. Twelve epochs of solutions were lost that way before anyone asked to
+    read one, and they are not recoverable: re-running an older commit answers a
+    different question, because the model is not deterministic.
+
+    Same contract as write_cell_artifacts — off unless a directory is given, and
+    never fatal. An archive step that can fail the cell it preserves is worse than
+    no archive.
+    """
+    written: List[str] = []
+    if archive_dir is None:
+        return written
+    stem = cell.cell_id.replace("/", "__")
+    try:
+        root = Path(archive_dir) / stem
+        for source_rel, dest_rel in ARCHIVED_CELL_PATHS:
+            source = Path(work_dir) / source_rel
+            if not source.exists():
+                continue
+            destination = root / dest_rel
+            if destination.exists():
+                shutil.rmtree(str(destination), ignore_errors=True)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(
+                str(source),
+                str(destination),
+                ignore=shutil.ignore_patterns(".git", "node_modules", "__pycache__"),
+            )
+            written.append(str(destination))
+    except OSError:
+        return written
+    return written
 
 
 def write_cell_artifacts(
@@ -3927,6 +3981,7 @@ def make_cell_runner(
     base_config: Dict[str, Any],
     per_slot_ctx: int,
     artifacts_dir: Optional[Any] = None,
+    archive_dir: Optional[Any] = None,
 ) -> Callable[[Cell, Task, Any], Dict[str, Any]]:
     """The live cell runner: one closure over the run-wide settings.
 
@@ -3946,6 +4001,7 @@ def make_cell_runner(
             timeout_sec=task.run_timeout_sec,
             per_slot_ctx=per_slot_ctx,
             artifacts_dir=artifacts_dir,
+            archive_dir=archive_dir,
         )
 
     return runner
@@ -4017,6 +4073,7 @@ def run_benchmark(
                 # Beside the results, because the work root is deleted at the
                 # start of the next run and these describe THIS one.
                 artifacts_dir=results_path / "diagnostics",
+                archive_dir=results_path / "trees",
             )
         for cell in cells:
             recorded = result_path(results_path, cell)
