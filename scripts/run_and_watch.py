@@ -102,6 +102,14 @@ TIERS: List[str] = []
 # against one throwaway git repo, so this number multiplies the whole run.
 REPS = 1
 
+# Extra baseline repetitions per task, placed beside the sweep they calibrate.
+# Not scoreboard cells: they measure THIS epoch's noise floor. Epoch 12 and 13
+# ran the same baseline cell at 6,364 and 614 generated tokens — a 10x swing on
+# an arm no change in this campaign can reach — so a cross-epoch difference in
+# another arm cannot be told from sampling without one. Baseline is the cheapest
+# arm, so three samples per task cost minutes and cannot alter what they measure.
+CALIBRATION_REPS: int = 2
+
 # The model. None means the manifest's own `defaults.model`, which for every set
 # in this repository is llamacpp/qwen3.8-27b. Set a string to run a different
 # one; the provider prefix is optional, so "qwen3.6-27b" and
@@ -352,6 +360,8 @@ def results_dir() -> str:
 def bench_argv(results: str, plan_only: bool) -> List[str]:
     """The command this script runs on your behalf, assembled from the config."""
     argv = [PYTHON, BENCH, "--manifest", MANIFEST, "--reps", str(REPS), "--results-dir", results]
+    if CALIBRATION_REPS:
+        argv += ["--calibration-reps", str(CALIBRATION_REPS)]
     for task in TASKS:
         argv += ["--task", task]
     for tier in TIERS:

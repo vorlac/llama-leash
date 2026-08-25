@@ -5298,3 +5298,90 @@ class ServedWindowTests(unittest.TestCase):
         with self.assertRaises(cb.BenchError) as ctx:
             cb.served_per_slot_context(ROUTER_CONFIG, SENTINEL_MODEL, fetch=down)
         self.assertIn("/props", str(ctx.exception))
+
+
+class CalibrationRepsTests(unittest.TestCase):
+    """Extra baseline repetitions, for measuring an epoch's own noise floor.
+
+    Every cross-epoch comparison in the 14.2 campaign is n=1 against n=1, and the
+    same baseline cell measured 6,364 generated tokens in one epoch and 614 in the
+    next — a 10x swing on an arm no harness change can reach. A difference in
+    another arm cannot be distinguished from sampling without a floor measured in
+    the same epoch.
+    """
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="cbench-calib-"))
+        self.addCleanup(shutil.rmtree, str(self.tmp), True)
+        self.tasks = fixture_tasks(self.tmp)
+
+    def _plan(self, calibration_reps, reps=1):
+        return cb._plan_cells(
+            [(SENTINEL_MODEL, cb.DEFAULT_CAPABILITY, self.tasks)],
+            arms=list(cb.ARMS),
+            reps=reps,
+            calibration_reps=calibration_reps,
+        )
+
+    def test_zero_calibration_reps_changes_nothing(self):
+        """The default must be inert, or every existing plan silently moves."""
+        self.assertEqual(
+            [c.cell_id for c in self._plan(0)],
+            [c.cell_id for c in cb._plan_cells(
+                [(SENTINEL_MODEL, cb.DEFAULT_CAPABILITY, self.tasks)],
+                arms=list(cb.ARMS), reps=1)],
+        )
+
+    def test_extra_cells_are_baseline_only_and_leave_the_compared_arms_even(self):
+        plan = self._plan(3)
+        counts = {}
+        for cell in plan:
+            counts[cell.arm] = counts.get(cell.arm, 0) + 1
+        n = len(self.tasks)
+        self.assertEqual(counts[cb.CALIBRATION_ARM], n * 4, "1 scoreboard rep + 3 calibration")
+        for arm in cb.ARMS:
+            if arm != cb.CALIBRATION_ARM:
+                self.assertEqual(counts[arm], n, f"{arm} must be untouched")
+
+        scoreboard = [c for c in plan if c.rep == 1]
+        board = {}
+        for cell in scoreboard:
+            board[cell.arm] = board.get(cell.arm, 0) + 1
+        self.assertEqual(len(set(board.values())), 1, "rep-1 cells stay balanced across arms")
+
+    def test_calibration_cells_sit_beside_the_sweep_they_calibrate(self):
+        """A floor measured an hour later is measuring a different machine.
+
+        The assertion is over the GLOBAL sequence, not over one task's cells.
+        Filtering the plan down to a single task_id erases exactly the evidence
+        this test exists to check: calibration cells appended at the end of the
+        whole block and calibration cells placed beside their own task look
+        identical once the other task's rows are dropped. The first version of
+        this test filtered, and passed against an implementation that batched
+        every calibration cell at the end.
+        """
+        plan = self._plan(2)
+        order = [(c.arm, c.task_id, c.rep) for c in plan]
+        first, second = self.tasks[0].id, self.tasks[1].id
+
+        last_calibration_of_first = max(
+            i for i, row in enumerate(order)
+            if row[0] == cb.CALIBRATION_ARM and row[1] == first and row[2] > 1
+        )
+        first_cell_of_second = min(i for i, row in enumerate(order) if row[1] == second)
+        self.assertLess(
+            last_calibration_of_first,
+            first_cell_of_second,
+            "task 1's calibration cells must all run before task 2 starts; batching them at "
+            f"the end of the block measures a different machine. Got {order}",
+        )
+        self.assertEqual(len(set(c.cell_id for c in plan)), len(plan), "cell ids stay unique")
+
+    def test_refusals(self):
+        with self.assertRaises(cb.BenchError):
+            self._plan(-1)
+        with self.assertRaises(cb.BenchError):
+            cb._plan_cells(
+                [(SENTINEL_MODEL, cb.DEFAULT_CAPABILITY, self.tasks)],
+                arms=["conductor"], reps=1, calibration_reps=2,
+            )

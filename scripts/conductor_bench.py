@@ -1542,6 +1542,7 @@ def build_run_plan(
     arms: Sequence[str] = ARMS,
     reps: int = DEFAULT_REPS,
     capabilities: Sequence[str] = (DEFAULT_CAPABILITY,),
+    calibration_reps: int = 0,
 ) -> List[Cell]:
     """Every cell, model-major, then repetition-major and arm-interleaved.
 
@@ -1554,17 +1555,43 @@ def build_run_plan(
         [(model, capability, list(tasks)) for model in models for capability in capabilities],
         arms=arms,
         reps=reps,
+        calibration_reps=calibration_reps,
     )
+
+
+CALIBRATION_ARM = "baseline"
 
 
 def _plan_cells(
     blocks: Sequence[Tuple[str, str, Sequence[Task]]],
     arms: Sequence[str],
     reps: int,
+    calibration_reps: int = 0,
 ) -> List[Cell]:
-    """The shared plan body: one arm-interleaved block per (model, capability)."""
+    """The shared plan body: one arm-interleaved block per (model, capability).
+
+    `calibration_reps` adds extra repetitions of the CALIBRATION_ARM only, placed
+    immediately after that task's balanced arm sweep. They are not scoreboard
+    cells and they do not disturb the balance property: truncating at any prefix
+    still leaves the COMPARED arms even to within one cell, because the extra
+    cells all belong to an arm whose scoreboard rep count is unchanged.
+
+    They exist because every cross-epoch comparison in this campaign is n=1
+    against n=1, and the same baseline cell measured 6,364 generated tokens in
+    one epoch and 614 in the next — a 10x swing on an arm no change can reach.
+    Without a within-epoch noise floor there is no way to say whether a
+    difference in another arm is a result. Baseline is the cheapest arm, so the
+    floor costs a few minutes and cannot alter what it measures.
+    """
     if reps < 1:
         raise BenchError("reps must be at least 1, got %r" % reps)
+    if calibration_reps < 0:
+        raise BenchError("calibration_reps must not be negative, got %r" % calibration_reps)
+    if calibration_reps and CALIBRATION_ARM not in arms:
+        raise BenchError(
+            "calibration_reps needs the %r arm in the sweep; got %s"
+            % (CALIBRATION_ARM, ", ".join(arms))
+        )
     for arm in arms:
         if arm not in ARMS:
             raise BenchError("unknown arm %r: the closed set is %s" % (arm, ", ".join(ARMS)))
@@ -1579,6 +1606,12 @@ def _plan_cells(
             for task in tasks:
                 for arm in arms:
                     plan.append(Cell(model, capability, arm, task.id, rep))
+                # Calibration cells sit beside the sweep they calibrate: a noise
+                # floor measured an hour later, in a different thermal state, is
+                # measuring something else.
+                if rep == 1:
+                    for extra in range(reps + 1, reps + 1 + calibration_reps):
+                        plan.append(Cell(model, capability, CALIBRATION_ARM, task.id, extra))
     return plan
 
 
@@ -4109,6 +4142,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--rubric-dir", default=str(RUBRIC_DIR), dest="rubric_dir")
     parser.add_argument("--seed-green", action="store_true", dest="seed_green")
     parser.add_argument("--plan-only", action="store_true", dest="plan_only")
+    parser.add_argument(
+        "--calibration-reps",
+        type=int,
+        default=0,
+        dest="calibration_reps",
+        help=(
+            "extra repetitions of the baseline arm per task, placed beside the sweep they "
+            "calibrate. They are not scoreboard cells; they measure this epoch's own noise "
+            "floor, without which a difference in another arm cannot be told from sampling."
+        ),
+    )
     parser.add_argument("--sweep", action="store_true", dest="sweep")
     # Repeatable: model is a matrix dimension, and the plan is grouped by it.
     # Absent, the model is the manifest's own `defaults.model`, so a manifest
@@ -4294,7 +4338,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         models = list(args.models) if args.models else [manifest.defaults["model"]]
         capabilities = list(args.capabilities) if args.capabilities else [DEFAULT_CAPABILITY]
         reps = DEFAULT_REPS if args.reps is None else args.reps
-        plan = build_run_plan(tasks, reps=reps, models=models, capabilities=capabilities)
+        plan = build_run_plan(
+            tasks,
+            reps=reps,
+            models=models,
+            capabilities=capabilities,
+            calibration_reps=args.calibration_reps,
+        )
 
     run_manifest = build_run_manifest(
         manifest,
