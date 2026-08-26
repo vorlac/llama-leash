@@ -26,7 +26,7 @@ clean context serves better than an accumulated one.
 > Read `docs/plans/2026-08-25-quality-judging-handoff.md` and
 > `docs/plans/2026-08-25-relative-metrics-and-stall-deadlines.md`, then build the quality-judging
 > instrument described there. Populate the rubric lane that already exists at
-> `bench/conductor/rubrics` and is validated by `conductor_bench.py::validate_rubric` but has
+> `.data/benchmark/conductor/rubrics` and is validated by `conductor_bench.py::validate_rubric` but has
 > never been written to by any epoch. Work to `bash scripts/test-conductor.sh` printing
 > GATE PASS and `bash scripts/conductor-gate.sh` printing M5 PASS. Before recording anything as
 > a new finding, run `python3 scripts/prior_art.py <mechanism>` — four defects in this campaign

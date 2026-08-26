@@ -61,7 +61,7 @@ of them yields a number with no interpretation. The instrument is a **blind pair
 - The comparison is run **twice with the order swapped**, because position bias is real and
   cheap to detect: an arm that wins in both orders won; an arm that wins only when shown first
   did not.
-- The result populates the rubric lane that **already exists** (`bench/conductor/rubrics`,
+- The result populates the rubric lane that **already exists** (`.data/benchmark/conductor/rubrics`,
   `validate_rubric`) and that no epoch has ever written to.
 
 Two axes, scored separately because they diverge:
