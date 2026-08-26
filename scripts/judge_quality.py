@@ -85,7 +85,13 @@ MIN_REASON_CHARS = 40
 # calibration: `finish_reason=length`, 0 answer characters, 3,167 characters of
 # reasoning, every one of the 700 tokens gone. The budget has to cover the
 # deliberation AND the sentence at the end of it.
-DEFAULT_MAX_TOKENS = 3000
+#
+# 3,000 was the second guess and it failed the same way on real trees rather than
+# on calibration fixtures: 16 of 30 comparisons in the first full run returned
+# `no_verdict` with the same message. Bigger trees are more to deliberate over,
+# so the budget has to be set against the real inputs — which is also why the
+# calibration corpus now has to reach their size.
+DEFAULT_MAX_TOKENS = 6000
 
 # How many judge calls may be in flight. Each is an independent scoring of a
 # fixed pair, so they overlap freely; the server has three slots and sat at one

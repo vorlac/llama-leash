@@ -692,6 +692,26 @@ class CalibrationCorpusTest(unittest.TestCase):
                       > sum(len(v) for v in case.worse.values()))
             self.assertEqual(case.better_is_longer, longer, case.case_id)
 
+    def test_the_corpus_reaches_the_size_of_real_inputs(self):
+        """A calibration corpus has to match the real inputs in SIZE, not only in kind.
+
+        The first corpus was 1-2 files and 187-860 rendered characters. Epoch 14's
+        real trees are 8-9 files and up to 6,312. The judge passed calibration on
+        the small fixtures and then exhausted its token budget on 16 of 30 real
+        comparisons — a calibration that certified the wrong thing, because
+        nothing checked that the cases resembled the job.
+
+        The floors are stated tolerances taken from that measurement, not derived
+        thresholds: a corpus that cannot reach the low end of the real range
+        cannot predict behaviour there.
+        """
+        widest = max(len(c.better) for c in self.cases)
+        longest = max(len(jq.render_side(c.better, "x")[0]) for c in self.cases)
+        self.assertGreaterEqual(widest, 8,
+                                "no case has as many files as a real tree (8-9)")
+        self.assertGreaterEqual(longest, 4000,
+                                "no case renders as large as a real tree (up to 6,312 chars)")
+
     def test_the_corpus_carries_both_length_directions(self):
         """A judge that just prefers more code must not be able to score 100%."""
         directions = {case.better_is_longer for case in self.cases}
