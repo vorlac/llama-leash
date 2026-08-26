@@ -124,16 +124,40 @@ as a bound rather than a target.
 
 Cheapest and most certain first. **None of it lands while an epoch is running.**
 
-| # | change | expected | risk |
-|---|---|---|---|
-| 1 | `--metrics` on | none directly — makes sections 1-2 measurable instead of reconstructed | none |
-| 2 | timestamp in the router ledger | none directly — makes every rate question answerable | none |
-| 3 | **parallelise the quality judge's own call loop** | the first honest test of the 2-2.5x prediction, on work with no measurement to corrupt | none to the campaign — see below |
-| 4 | raise `--cache-ram` | fewer evictions; upper bound is the 5.6 h of cold prefill | memory pressure; must be sized against slot KV |
-| 5 | `-ctk q8_0 -ctv q8_0` | ~halves KV bytes: smaller cache entries, less KV read per decode step, more headroom for 4 | quality effect unmeasured on this model |
-| 6 | reach the fan-out phase (planner budget) | creates the demand that fills slots; also fixes the 0/4 cell failures | this is harness work, not a flag |
-| 7 | campaign-level cell parallelism | uses the idle slots directly | **corrupts wall-clock cost measurement** — see below |
-| 8 | speculative decoding (`--model-draft`) | the only lever that helps at concurrency 1 | needs a small same-vocab draft model; none is local |
+| # | change | state | expected | risk |
+|---|---|---|---|---|
+| 1 | `--metrics` on | **landed** | none directly — makes sections 1-2 measurable instead of reconstructed | none |
+| 2 | timestamp in the router ledger | **landed** | none directly — makes every rate question answerable | none |
+| 3 | **parallelise the quality judge's own call loop** | **landed** | the first honest test of the 2-2.5x prediction, on work with no measurement to corrupt | none to the campaign — see below |
+| 4 | raise `--cache-ram` | open | fewer evictions; upper bound is the 5.6 h of cold prefill | memory pressure; must be sized against slot KV |
+| 5 | `-ctk q8_0 -ctv q8_0` | open | ~halves KV bytes: smaller cache entries, less KV read per decode step, more headroom for 4 | quality effect unmeasured on this model |
+| 6 | reach the fan-out phase (planner budget) | open | creates the demand that fills slots; also fixes the 0/4 cell failures | this is harness work, not a flag |
+| 7 | campaign-level cell parallelism | open | uses the idle slots directly | **corrupts wall-clock cost measurement** — see below |
+| 8 | speculative decoding (`--model-draft`) | open | the only lever that helps at concurrency 1 | needs a small same-vocab draft model; none is local |
+
+### What 1 and 2 turned out to require
+
+**`/metrics` is per-model and refuses an unqualified request.** Under
+`--models-preset`, `GET /metrics` answers `400 model name is missing from the request`;
+the counters come from `GET /metrics?model=<id>`. A sampler that omits the parameter
+records nothing and looks like a server publishing nothing, which is the same shape as
+the flag being off. Probed 2026-08-26 against qwen3.8-27b: the endpoint carries
+`llamacpp:prompt_tokens_cached_total` and `llamacpp:n_decode_total`, which are the two
+counters section 2's cache-eviction question needs.
+
+**The counters are pull-only, so item 1 is half a measurement.** Nothing in this
+repository samples `/metrics` or `/slots`; the figures in section 1 came from a
+hand-rolled poller that was thrown away. The flag makes the next epoch measurable *if
+something records during it*. A periodic sampler writing one JSONL line per interval is
+the missing half, and it is not yet written.
+
+**The ledger stamp is `completedAt`, spelled `+00:00` rather than `Z`.** Both are valid
+ISO-8601 and only one parses under `/usr/bin/python3` — the 3.9 interpreter
+`scripts/test-conductor.sh` pins, whose `datetime.fromisoformat` rejects a trailing `Z`
+outright. Every program that reads this file is one of those scripts. The stamp is the
+instant the request *finished*; the interval is recoverable from the line itself, since
+the request began `completedAt - queueWaitMs - upstreamMs`. Lexicographic order is
+chronological order, so the file sorts with no parser at all.
 
 ### On 3, and why the judge is the right first experiment
 

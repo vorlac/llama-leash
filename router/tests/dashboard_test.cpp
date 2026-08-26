@@ -155,18 +155,24 @@
 //
 // THE LEDGER LINE THIS READER CONSUMES is whatever router/metrics.hpp actually
 // writes, read from the code at HEAD rather than assumed. MetricsLedger::toJson
-// (metrics.hpp:200-222) sets exactly twelve keys and appendLine (metrics.hpp:
-// 158-197) emits `toJson(entry).dump(-1, ' ', false, replace)` followed by one
+// sets exactly thirteen keys and appendLine emits
+// `toJson(entry, completedAt).dump(-1, ' ', false, replace)` followed by one
 // '\n'. nlohmann::json's object type is std::map, so the dumped keys are in
-// ALPHABETICAL order, compact, with no whitespace. A full line and an
-// everything-absent line are therefore, byte for byte:
+// ALPHABETICAL order, compact, with no whitespace — which puts completedAt
+// first, ahead of completionTokens. A full line and an everything-absent line
+// are therefore, byte for byte:
 //
-//   {"completionTokens":21,"group":"g-1","model":"model-a","priority":"review",
+//   {"completedAt":"2026-08-26T21:35:12.482+00:00","completionTokens":21,
+//    "group":"g-1","model":"model-a","priority":"review",
 //    "promptTokens":7,"queueWaitMs":12,"role":"reviewer","schemaConformed":true,
 //    "schemaMissing":false,"status":200,"timings":{...},"upstreamMs":34}
-//   {"completionTokens":null,"group":null,"model":"","priority":"interactive",
+//   {"completedAt":"2026-08-26T21:35:12.482+00:00","completionTokens":null,
+//    "group":null,"model":"","priority":"interactive",
 //    "promptTokens":null,"queueWaitMs":0,"role":null,"schemaConformed":null,
 //    "schemaMissing":null,"status":503,"timings":null,"upstreamMs":null}
+//
+// The reader names no completedAt of its own, so rendering it here is what
+// proves an unnamed key is ignored rather than skipping the line.
 //
 // (shown wrapped; the real line has no newline until its terminator). The
 // helpers below render exactly that shape, so the reader is tested against the
@@ -248,6 +254,7 @@ namespace {
     // std::map object type dumps. Defaults match the "nothing was observed"
     // line: absence is JSON null, never a missing key.
     struct LineSpec {
+        std::string completedAt{ "2026-08-26T21:35:12.482+00:00" };
         std::string model{ "model-a" };
         std::optional<std::string> role{};
         std::optional<std::string> group{};
@@ -286,6 +293,7 @@ namespace {
 
     std::string renderLine(const LineSpec& spec) {
         std::string line = "{";
+        line += "\"completedAt\":" + jsonString(spec.completedAt) + ",";
         line += "\"completionTokens\":" + numberOrNull(spec.completionTokens) + ",";
         line += "\"group\":" + stringOrNull(spec.group) + ",";
         line += "\"model\":" + jsonString(spec.model) + ",";

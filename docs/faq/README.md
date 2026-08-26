@@ -83,9 +83,10 @@ llama-server --models-preset .data/configs/llama-models.ini --models-max 1 --mod
 
 `--models-max 1` keeps one model resident, which is what makes switching models in opencode's
 picker transparent; one process per model would hold several 25 GB models resident at once.
-`scripts/serve.py` adds `--host`, `--port`, `--jinja` and the slot sizing on top of that line:
-`--parallel <slots>` with a total `--ctx-size` of 8192 tokens per slot, where slots comes from
-`--max-readers` (6 by default). `--ctx-size` is llama-server's *total* context divided among
+`scripts/serve.py` adds `--host`, `--port`, `--jinja`, `--metrics` and the slot sizing on top of
+that line: `--parallel <slots>` with a total `--ctx-size` of 32768 tokens per slot, where slots
+comes from `--max-readers` (6 by default). `--metrics` publishes llama-server's own slot and
+cache counters at `/metrics`; with it off the server reports nothing about its own occupancy. `--ctx-size` is llama-server's *total* context divided among
 slots, so the per-model `ctx-size` in the INI is overridden whenever more than one slot runs.
 
 ## What does "fits" versus "tight" actually mean?

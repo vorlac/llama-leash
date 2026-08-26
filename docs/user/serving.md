@@ -21,14 +21,15 @@ arrive. There is no per-model process and no per-model port.
 ```bash
 llama-server --models-preset .data/configs/llama-models.ini \
              --models-max 1 --models-autoload \
-             --host 127.0.0.1 --port 8080 --jinja \
-             --parallel 6 --ctx-size 49152
+             --host 127.0.0.1 --port 8080 --jinja --metrics \
+             --parallel 6 --ctx-size 196608
 ```
 
 `--parallel` and `--ctx-size` are derived, not typed: `--parallel` is the number of concurrent
 sub-sessions the session is sized for (`--max-readers`, default 6), and `--ctx-size` is
 `llama-server`'s *total* context, which it divides among those slots — so 6 slots at the
-8192-token per-slot window is 49152. Because the total is divided, a `ctx-size` written in the
+32768-token per-slot window is 196608. `--metrics` is not derived and takes no value: it turns on
+the `/metrics` endpoint carrying the server's slot and cache counters. Because the total is divided, a `ctx-size` written in the
 preset file is overridden on the command line whenever more than one slot is requested. At one
 slot `serve.py` emits no `--ctx-size` at all unless you pass `--ctx`, and each model's preset
 value applies.

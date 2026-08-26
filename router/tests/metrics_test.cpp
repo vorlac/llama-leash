@@ -2466,3 +2466,88 @@ TEST_CASE(
     CHECK(upstream.requestCount() == 1);
     REQUIRE(awaitLedgerLines(tmp.ledgerPath(), 2));
 }
+
+// -----------------------------------------------------------------------------
+// The ledger's wall-clock stamp. Without it no rate, concurrency or per-epoch
+// question is answerable from the file, and the file silently spans runs: a
+// first pass at the throughput analysis derived "2.8x concurrency" from a ledger
+// holding 146 records for a task that had not run in the epoch being measured,
+// and was wrong by nearly three times.
+// -----------------------------------------------------------------------------
+
+TEST_CASE(
+    "[throughput-2-ledger-clock] the stamp is UTC, millisecond, and parses on the pinned "
+    "interpreter") {
+    using namespace std::chrono;
+
+    // 2026-08-26T21:35:12.482 UTC as a count from the epoch, so the expected
+    // string is arithmetic rather than a re-run of the code under test.
+    const auto instant =
+        sys_days{ year{ 2026 } / August / 26 } + hours{ 21 } + minutes{ 35 } + seconds{ 12 };
+    const system_clock::time_point stamped =
+        system_clock::time_point{ duration_cast<system_clock::duration>(instant.time_since_epoch()) } + milliseconds{ 482 };
+
+    const std::string text = conductor::router::detail::formatLedgerTimestamp(stamped);
+
+    CHECK(text == "2026-08-26T21:35:12.482+00:00");
+
+    // A `Z` suffix would be equally valid ISO-8601 and would NOT parse under
+    // /usr/bin/python3 — the 3.9 interpreter the gate pins, whose
+    // datetime.fromisoformat rejects it. The offset is spelled out for that
+    // reason and the choice is pinned here so it cannot drift back.
+    CHECK(text.find('Z') == std::string::npos);
+    CHECK(text.substr(text.size() - 6) == "+00:00");
+
+    // Millisecond precision exactly: coarser loses ordering within a burst,
+    // finer is noise the clock does not carry.
+    CHECK(text.size() == 29);
+    CHECK(text[19] == '.');
+
+    // Midnight keeps every field zero-padded rather than collapsing.
+    const auto midnight = sys_days{ year{ 2026 } / January / 1 };
+    CHECK(conductor::router::detail::formatLedgerTimestamp(
+              system_clock::time_point{
+                  duration_cast<system_clock::duration>(midnight.time_since_epoch()) }) == "2026-01-01T00:00:00.000+00:00");
+}
+
+TEST_CASE("[throughput-2-ledger-clock] every ledger line carries the instant it completed") {
+    TempDir tmp("ledger-clock");
+
+    StubUpstream upstream;
+    answerWith(upstream, kUpstreamAnswer);
+    upstream.start();
+
+    conductor::router::Router router(makeConfig(upstream.port(), tmp.ledgerPath()));
+    router.start();
+
+    const auto before = std::chrono::system_clock::now();
+
+    httplib::Client client(kHost, router.listen_port());
+    configureClient(client);
+    for (int request = 0; request < 2; ++request) {
+        const auto response = client.Post(kChatPath, httplib::Headers{},
+                                          chatBody("clock-" + std::to_string(request)),
+                                          "application/json");
+        REQUIRE(response);
+        CHECK(response->status == 200);
+    }
+
+    REQUIRE(awaitLedgerLines(tmp.ledgerPath(), 2));
+    const auto after = std::chrono::system_clock::now();
+
+    const std::vector<json> lines = ledgerLineJson(tmp.ledgerPath());
+    REQUIRE(lines.size() == 2);
+
+    std::vector<std::string> stamps;
+    for (const json& line : lines) {
+        REQUIRE(line.contains("completedAt"));
+        REQUIRE(line["completedAt"].is_string());
+        stamps.push_back(line["completedAt"].get<std::string>());
+    }
+
+    // Lexicographic order IS chronological order for this format, which is what
+    // makes the file sortable with no parser at all.
+    CHECK(stamps[0] <= stamps[1]);
+    CHECK(conductor::router::detail::formatLedgerTimestamp(before) <= stamps[0]);
+    CHECK(stamps[1] <= conductor::router::detail::formatLedgerTimestamp(after));
+}

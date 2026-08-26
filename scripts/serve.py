@@ -322,6 +322,12 @@ def build_server_command(
         "--port",
         str(port),
         "--jinja",
+        # Publishes the slot and cache counters on /metrics. Without it the server
+        # reports nothing about its own occupancy, and every throughput figure has
+        # to be rebuilt from log lines - a reconstruction that has already been
+        # wrong by a factor of nearly three
+        # (docs/plans/2026-08-25-throughput-and-serving-parameters.md section 3).
+        "--metrics",
     ]
     # --ctx-size is llama-server's TOTAL context, divided among slots, so the
     # configured per-slot window and the slot count are ONE derivation

@@ -428,7 +428,7 @@ class ParallelDerivation(WiringTestCase):
             self.assertNotIn(
                 "--parallel", head, "HEAD's serve.py emitted no --parallel; 12.1 adds it"
             )
-            self.assertEqual(cmd, head + cw.parallel_server_args(slots, 4096))
+            self.assertEqual(cmd, head + ["--metrics"] + cw.parallel_server_args(slots, 4096))
 
             seen.append((slots, cmd[cmd.index("--parallel") + 1], config["admission"]["maxInflightPerModel"]))
 
@@ -478,7 +478,7 @@ class ParallelDerivation(WiringTestCase):
         self.assertEqual(
             cmd,
             head_server_command(self.configs, UPSTREAM_HOST, UPSTREAM_PORT, None)
-            + ["--parallel", "1", "--ctx-size", "4096"],
+            + ["--metrics", "--parallel", "1", "--ctx-size", "4096"],
         )
 
     def test_12_1_ctx_configured_reaches_the_derivation(self) -> None:
@@ -535,6 +535,28 @@ class ParallelDerivation(WiringTestCase):
             (config["upstream"]["host"], config["upstream"]["port"]),
             "a router told to proxy to its own listen address: %r" % (config,),
         )
+
+
+class MetricsEndpoint(WiringTestCase):
+    def test_the_server_publishes_its_own_counters(self) -> None:
+        """[throughput-1] `--metrics` is on, so occupancy is read rather than reconstructed.
+
+        With it off the server publishes no slot or cache counter at all, and every
+        occupancy figure in docs/plans/2026-08-25-throughput-and-serving-parameters.md
+        had to be rebuilt from log lines and a hand-rolled poller. One such
+        reconstruction was wrong by a factor of nearly three before it was caught.
+        """
+        slots = cw.DEFAULT_MAX_READERS
+        cmd = serve.build_server_command(MODEL_ID, UPSTREAM_HOST, UPSTREAM_PORT, 1, 4096, slots)
+
+        self.assertEqual(cmd.count("--metrics"), 1, cmd)
+
+        # A bare switch, so whatever follows must itself be a flag: a value parked
+        # after it would be consumed as the next flag's argument.
+        self.assertTrue(cmd[cmd.index("--metrics") + 1].startswith("--"), cmd)
+
+        head = head_server_command(self.configs, UPSTREAM_HOST, UPSTREAM_PORT, None)
+        self.assertNotIn("--metrics", head, "this is an addition to the invocation, not a rewrite")
 
 
 class FragmentMerge(WiringTestCase):

@@ -28,8 +28,10 @@
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -42,6 +44,41 @@
 #include "router/config.hpp"
 
 namespace conductor::router {
+
+    namespace detail {
+
+        // The ledger's wall-clock stamp, UTC, to the millisecond:
+        // `2026-08-26T21:35:12.482+00:00`. Pure, so it is pinned by an exact
+        // string rather than by a range around the clock.
+        //
+        // The offset is spelled `+00:00` and not `Z`. Both are valid ISO-8601
+        // and only one of them parses under /usr/bin/python3, the 3.9
+        // interpreter scripts/test-conductor.sh pins: its
+        // datetime.fromisoformat rejects a trailing `Z`. Every program that
+        // reads this file is one of those scripts.
+        //
+        // Lexicographic order is chronological order in this format, so the
+        // ledger sorts with no parser at all.
+        [[nodiscard]] inline std::string formatLedgerTimestamp(
+            std::chrono::system_clock::time_point instant) {
+            const auto stamp = std::chrono::floor<std::chrono::milliseconds>(instant);
+            const auto midnight = std::chrono::floor<std::chrono::days>(stamp);
+            const std::chrono::year_month_day date{ midnight };
+            const std::chrono::hh_mm_ss<std::chrono::milliseconds> clock{ stamp - midnight };
+
+            char text[32];
+            std::snprintf(text, sizeof(text), "%04d-%02u-%02uT%02d:%02d:%02d.%03d+00:00",
+                          static_cast<int>(date.year()), static_cast<unsigned>(date.month()),
+                          static_cast<unsigned>(date.day()),
+                          static_cast<int>(clock.hours().count()),
+                          static_cast<int>(clock.minutes().count()),
+                          static_cast<int>(clock.seconds().count()),
+                          static_cast<int>(clock.subseconds().count()));
+
+            return std::string(text);
+        }
+
+    }  // namespace detail
 
     // ONE request's ledger line, exactly §4.4's field set (plan lines
     // 1680-1684) under the pinned camelCase keys. Every key is PRESENT on
@@ -90,9 +127,13 @@ namespace conductor::router {
         MetricsLedger& operator=(const MetricsLedger&) = delete;
 
         void record(const RequestRecord& entry) {
+            // Read before the lock: under contention the wait would land in the
+            // stamp, and the stamp is what every rate question divides by.
+            const auto completedAt = std::chrono::system_clock::now();
+
             const std::lock_guard<std::mutex> lock(mutex_);
             accumulate(entry);
-            appendLine(entry);
+            appendLine(entry, completedAt);
         }
 
         // The union aggregate both /conductor/metrics and the fan-out side
@@ -155,13 +196,14 @@ namespace conductor::router {
         // ONE write of `<compact json>\n`, flushed, under mutex_ — concurrent
         // completions can never tear or interleave a line. Every failure mode
         // becomes a warn naming the configured path, never a throw.
-        void appendLine(const RequestRecord& entry) {
+        void appendLine(const RequestRecord& entry,
+                        std::chrono::system_clock::time_point completedAt) {
             std::string line;
             try {
                 // The replace handler keeps a client-supplied byte sequence
                 // that is not valid UTF-8 from failing the serialization —
                 // the request it rode in on was still served (G5).
-                line = toJson(entry).dump(
+                line = toJson(entry, completedAt).dump(
                     -1, ' ', false, nlohmann::json::error_handler_t::replace);
             } catch (const std::exception& failure) {
                 spdlog::warn(
@@ -197,8 +239,16 @@ namespace conductor::router {
         }
 
         // Every pinned key present on every line; absence is JSON null.
-        [[nodiscard]] static nlohmann::json toJson(const RequestRecord& entry) {
+        //
+        // completedAt is the instant the request FINISHED, which is when the
+        // record guard fires. The interval it belongs to is recoverable from
+        // the line itself: the request began completedAt - queueWaitMs -
+        // upstreamMs. One field is therefore enough to answer every rate and
+        // concurrency question the file previously could not.
+        [[nodiscard]] static nlohmann::json toJson(
+            const RequestRecord& entry, std::chrono::system_clock::time_point completedAt) {
             nlohmann::json line;
+            line["completedAt"] = detail::formatLedgerTimestamp(completedAt);
             line["model"] = entry.model;
             line["role"] = entry.role ? nlohmann::json(*entry.role) : nlohmann::json();
             line["group"] = entry.group ? nlohmann::json(*entry.group) : nlohmann::json();

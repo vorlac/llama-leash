@@ -12,8 +12,8 @@
 //
 // WHAT THIS READS. router/metrics.hpp's MetricsLedger::appendLine writes one
 // `<compact json>\n` per COMPLETED request, flushed per line, append-only. Its
-// toJson sets twelve keys; this reader takes eleven of them and ignores
-// `timings`, which no pane displays. Unknown keys are ignored too, so a later
+// toJson sets thirteen keys; this reader takes eleven of them and ignores
+// `timings` and `completedAt`, which no pane displays. Unknown keys are ignored too, so a later
 // field added to the writer cannot break the viewer. Only `status` is
 // load-bearing: a line without a numeric one is not a request record and is
 // refused. Absence and JSON null are the same thing to every optional column.
