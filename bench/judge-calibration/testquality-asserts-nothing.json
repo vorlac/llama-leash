@@ -1,0 +1,15 @@
+{
+  "id": "testquality-asserts-nothing",
+  "criterion": "testQuality",
+  "prompt": "src/slugify.ts exports slugify(input). Make it turn an arbitrary title into a URL slug: lowercase the text, replace every run of characters that are not letters or digits with a single '-', and remove leading and trailing '-'. Keep the existing export name and signature.",
+  "better": {
+    "src/slugify.ts": "export function slugify(input: string): string {\n  return input\n    .toLowerCase()\n    .replace(/[^\\p{L}\\p{N}]+/gu, \"-\")\n    .replace(/^-+|-+$/gu, \"\");\n}\n",
+    "tests/slugify.test.ts": "import { test } from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { slugify } from \"../src/slugify.ts\";\n\ntest(\"lowercases and joins words with a single dash\", () => {\n  assert.equal(slugify(\"Hello World\"), \"hello-world\");\n});\n\ntest(\"collapses a run of punctuation into one dash\", () => {\n  assert.equal(slugify(\"a -- b\"), \"a-b\");\n});\n\ntest(\"strips leading and trailing dashes\", () => {\n  assert.equal(slugify(\"!!hello!!\"), \"hello\");\n});\n\ntest(\"keeps digits\", () => {\n  assert.equal(slugify(\"Part 2\"), \"part-2\");\n});\n\ntest(\"an input of only punctuation becomes the empty string\", () => {\n  assert.equal(slugify(\"!!!\"), \"\");\n});\n"
+  },
+  "worse": {
+    "src/slugify.ts": "export function slugify(input: string): string {\n  return input\n    .toLowerCase()\n    .replace(/[^\\p{L}\\p{N}]+/gu, \"-\")\n    .replace(/^-+|-+$/gu, \"\");\n}\n",
+    "tests/slugify.test.ts": "import { test } from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { slugify } from \"../src/slugify.ts\";\n\ntest(\"slugify works\", () => {\n  slugify(\"Hello World\");\n  assert.ok(true);\n});\n\ntest(\"slugify does not throw\", () => {\n  assert.doesNotThrow(() => slugify(\"!!hello!!\"));\n});\n\ntest(\"slugify returns a string\", () => {\n  assert.equal(typeof slugify(\"Part 2\"), \"string\");\n});\n"
+  },
+  "why": "the worse suite calls slugify and then asserts ok(true), does-not-throw and typeof \u2014 three tests that pass against every possible implementation, including one that returns its input unchanged",
+  "betterIsLonger": true
+}

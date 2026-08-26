@@ -21,8 +21,10 @@ starting opencode, llama-server, llama-router or a model.
 
 Scoring is the hidden test command's exit status, passed through. There is no
 partial credit and nothing model-graded anywhere in this file. Beside it rides
-a hand-scored rubric lane, which is the only thing here that reads a judgement,
-and it is entered by a person rather than derived.
+the rubric lane, which is the only thing here that reads a judgement: this file
+validates and aggregates records but derives none of them, and each record names
+its own reviewer, who may be a person or the blind paired judge in
+scripts/judge_quality.py.
 """
 
 from __future__ import annotations
@@ -343,6 +345,11 @@ TIER_COST_LABELS = (
 # The rubric lane. Pass rate answers "is it better on average"; these answer
 # "is the result something a person would keep", which is the question the
 # harness exists to move and which no exit status reaches.
+#
+# HIGHER IS BETTER on every criterion, including the two named for a defect:
+# `deadCode: 3` means none was found. Stating it matters because a row of five
+# medians read left to right is unreadable if two of them invert, and nothing
+# else in this file or the records themselves carries the polarity.
 RUBRIC_CRITERIA = ("structure", "decomposition", "testQuality", "deadCode", "overBuilding")
 RUBRIC_SCORES = (0, 1, 2, 3)
 
@@ -3855,11 +3862,19 @@ def _rubric_lines(
 ) -> List[str]:
     lines = [SECTION_RUBRIC, ""]
     lines.append(
-        "Hand-scored on a stratified sample. The pass rate answers whether an "
-        "arm is better on average; this answers whether its output is something "
-        "a person would keep."
+        "Scored on a stratified sample. The pass rate answers whether an arm is "
+        "better on average; this answers whether its output is something a "
+        "person would keep. Higher is better on every criterion, including the "
+        "two named for a defect: `deadCode: 3` means none was found."
     )
     lines.append("")
+    reviewers = sorted({row["reviewer"] for row in rubrics})
+    if reviewers:
+        # Who scored these is not a footnote. A median taken over a mix of a
+        # person's records and a model's is a number with no single meaning, and
+        # nothing else in the report would show that it happened.
+        lines.append("Scored by: %s." % "; ".join(reviewers))
+        lines.append("")
     summary = aggregate_rubrics(rubrics, results, arms=arms)
     lines.append("| Arm | cells reviewed | %s |" % " | ".join(RUBRIC_CRITERIA))
     lines.append("|---|---|%s" % ("---|" * len(RUBRIC_CRITERIA)))

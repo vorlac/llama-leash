@@ -1,0 +1,13 @@
+{
+  "id": "overbuilding-strategy-registry",
+  "criterion": "overBuilding",
+  "prompt": "src/slugify.ts exports slugify(input). Make it turn an arbitrary title into a URL slug: lowercase the text, replace every run of characters that are not letters or digits with a single '-', and remove leading and trailing '-'. Keep the existing export name and signature.",
+  "better": {
+    "src/slugify.ts": "export function slugify(input: string): string {\n  return input\n    .toLowerCase()\n    .replace(/[^\\p{L}\\p{N}]+/gu, \"-\")\n    .replace(/^-+|-+$/gu, \"\");\n}\n"
+  },
+  "worse": {
+    "src/slugify.ts": "type Transform = (value: string) => string;\n\ninterface SlugStrategy {\n  readonly name: string;\n  apply(value: string): string;\n}\n\nclass LowercaseStrategy implements SlugStrategy {\n  readonly name = \"lowercase\";\n  apply(value: string): string {\n    return value.toLowerCase();\n  }\n}\n\nclass SeparatorStrategy implements SlugStrategy {\n  readonly name = \"separator\";\n  constructor(private readonly separator: string) {}\n  apply(value: string): string {\n    return value.replace(/[^\\p{L}\\p{N}]+/gu, this.separator);\n  }\n}\n\nclass TrimStrategy implements SlugStrategy {\n  readonly name = \"trim\";\n  apply(value: string): string {\n    return value.replace(/^-+|-+$/gu, \"\");\n  }\n}\n\nclass SlugPipeline {\n  private readonly strategies: SlugStrategy[] = [];\n  register(strategy: SlugStrategy): this {\n    this.strategies.push(strategy);\n    return this;\n  }\n  run(value: string): string {\n    return this.strategies.reduce((acc, s) => s.apply(acc), value);\n  }\n}\n\nconst registry = new SlugPipeline()\n  .register(new LowercaseStrategy())\n  .register(new SeparatorStrategy(\"-\"))\n  .register(new TrimStrategy());\n\nexport function slugify(input: string): string {\n  return registry.run(input);\n}\n"
+  },
+  "why": "the task asks for one pure string function; the worse implementation adds an interface, three strategy classes and a pipeline registry to reach the same three string operations, and nothing registers a fourth strategy",
+  "betterIsLonger": false
+}

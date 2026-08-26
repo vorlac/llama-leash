@@ -1,0 +1,13 @@
+{
+  "id": "deadcode-unused-scaffold",
+  "criterion": "deadCode",
+  "prompt": "src/slugify.ts exports slugify(input). Make it turn an arbitrary title into a URL slug: lowercase the text, replace every run of characters that are not letters or digits with a single '-', and remove leading and trailing '-'. Keep the existing export name and signature.",
+  "better": {
+    "src/slugify.ts": "export function slugify(input: string): string {\n  return input\n    .toLowerCase()\n    .replace(/[^\\p{L}\\p{N}]+/gu, \"-\")\n    .replace(/^-+|-+$/gu, \"\");\n}\n"
+  },
+  "worse": {
+    "src/slugify.ts": "export function slugify(input: string): string {\n  return input\n    .toLowerCase()\n    .replace(/[^\\p{L}\\p{N}]+/gu, \"-\")\n    .replace(/^-+|-+$/gu, \"\");\n}\n\ntype SlugOptions = { separator: string; maxLength: number };\n\nconst DEFAULT_OPTIONS: SlugOptions = { separator: \"-\", maxLength: 96 };\n\nfunction truncate(value: string, limit: number): string {\n  if (value.length <= limit) {\n    return value;\n  }\n  return value.slice(0, limit).replace(/-+$/u, \"\");\n}\n\nfunction withSeparator(value: string, separator: string): string {\n  return value.split(\"-\").join(separator);\n}\n\nfunction normalizeOptions(given: Partial<SlugOptions>): SlugOptions {\n  return { ...DEFAULT_OPTIONS, ...given };\n}\n"
+  },
+  "why": "both export the identical slugify; the worse file then carries SlugOptions, DEFAULT_OPTIONS, truncate, withSeparator and normalizeOptions, none of which is referenced by anything",
+  "betterIsLonger": false
+}

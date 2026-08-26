@@ -1,0 +1,15 @@
+{
+  "id": "testquality-restates-the-implementation",
+  "criterion": "testQuality",
+  "prompt": "src/slugify.ts exports slugify(input). Make it turn an arbitrary title into a URL slug: lowercase the text, replace every run of characters that are not letters or digits with a single '-', and remove leading and trailing '-'. Keep the existing export name and signature.",
+  "better": {
+    "src/slugify.ts": "export function slugify(input: string): string {\n  return input\n    .toLowerCase()\n    .replace(/[^\\p{L}\\p{N}]+/gu, \"-\")\n    .replace(/^-+|-+$/gu, \"\");\n}\n",
+    "tests/slugify.test.ts": "import { test } from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { slugify } from \"../src/slugify.ts\";\n\ntest(\"collapses punctuation runs and trims the edges\", () => {\n  assert.equal(slugify(\"!! Hello -- World !!\"), \"hello-world\");\n});\n\ntest(\"an input of only punctuation becomes the empty string\", () => {\n  assert.equal(slugify(\"!!!\"), \"\");\n});\n"
+  },
+  "worse": {
+    "src/slugify.ts": "export function slugify(input: string): string {\n  return input\n    .toLowerCase()\n    .replace(/[^\\p{L}\\p{N}]+/gu, \"-\")\n    .replace(/^-+|-+$/gu, \"\");\n}\n",
+    "tests/slugify.test.ts": "import { test } from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { slugify } from \"../src/slugify.ts\";\n\ntest(\"applies the same replace chain the implementation applies\", () => {\n  const input = \"Hello World\";\n  const expected = input\n    .toLowerCase()\n    .replace(/[^\\p{L}\\p{N}]+/gu, \"-\")\n    .replace(/^-+|-+$/gu, \"\");\n  assert.equal(slugify(input), expected);\n});\n\ntest(\"applies the same replace chain on punctuation\", () => {\n  const input = \"!!hello!!\";\n  const expected = input\n    .toLowerCase()\n    .replace(/[^\\p{L}\\p{N}]+/gu, \"-\")\n    .replace(/^-+|-+$/gu, \"\");\n  assert.equal(slugify(input), expected);\n});\n"
+  },
+  "why": "the worse suite recomputes the implementation's own replace chain as its expected value, so it passes for any chain the implementation happens to run and cannot fail on a wrong one; the better suite has FEWER tests and names literal expected outputs",
+  "betterIsLonger": false
+}

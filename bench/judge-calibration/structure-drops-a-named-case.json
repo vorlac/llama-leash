@@ -1,0 +1,13 @@
+{
+  "id": "structure-drops-a-named-case",
+  "criterion": "structure",
+  "prompt": "src/slugify.ts exports slugify(input). Make it turn an arbitrary title into a URL slug: lowercase the text, replace every run of characters that are not letters or digits with a single '-', and remove leading and trailing '-'. Keep the existing export name and signature.",
+  "better": {
+    "src/slugify.ts": "export function slugify(input: string): string {\n  return input\n    .toLowerCase()\n    .replace(/[^\\p{L}\\p{N}]+/gu, \"-\")\n    .replace(/^-+|-+$/gu, \"\");\n}\n"
+  },
+  "worse": {
+    "src/slugify.ts": "export function slugify(input: string): string {\n  return input\n    .toLowerCase()\n    .replace(/[^\\p{L}\\p{N}]+/gu, \"-\");\n}\n"
+  },
+  "why": "the task names removing leading and trailing dashes and the worse implementation never does it, so slugify('!!hello!!') keeps both edges",
+  "betterIsLonger": true
+}

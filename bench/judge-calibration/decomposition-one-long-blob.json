@@ -1,0 +1,13 @@
+{
+  "id": "decomposition-one-long-blob",
+  "criterion": "decomposition",
+  "prompt": "src/report.ts exports renderReport(rows). Given a list of {name, count} rows, return a text table: a header line, one line per row with the name padded to the widest name, and a total line. Skip rows whose count is zero.",
+  "better": {
+    "src/report.ts": "export type Row = { name: string; count: number };\n\nfunction present(rows: Row[]): Row[] {\n  return rows.filter((row) => row.count !== 0);\n}\n\nfunction widestName(rows: Row[]): number {\n  return rows.reduce((widest, row) => Math.max(widest, row.name.length), 0);\n}\n\nfunction line(name: string, value: string | number, width: number): string {\n  return name.padEnd(width) + \"  \" + value + \"\\n\";\n}\n\nexport function renderReport(rows: Row[]): string {\n  const kept = present(rows);\n  const width = Math.max(widestName(kept), \"total\".length);\n  const total = kept.reduce((sum, row) => sum + row.count, 0);\n  return (\n    line(\"name\", \"count\", width) +\n    kept.map((row) => line(row.name, row.count, width)).join(\"\") +\n    line(\"total\", total, width)\n  );\n}\n"
+  },
+  "worse": {
+    "src/report.ts": "export type Row = { name: string; count: number };\n\nexport function renderReport(rows: Row[]): string {\n  const kept = [];\n  for (const row of rows) {\n    if (row.count !== 0) {\n      kept.push(row);\n    }\n  }\n  let widest = 0;\n  for (const row of kept) {\n    if (row.name.length > widest) {\n      widest = row.name.length;\n    }\n  }\n  let out = \"name\" + \" \".repeat(Math.max(0, widest - 4)) + \"  count\\n\";\n  let total = 0;\n  for (const row of kept) {\n    out += row.name + \" \".repeat(Math.max(0, widest - row.name.length)) + \"  \" + row.count + \"\\n\";\n    total += row.count;\n  }\n  out += \"total\" + \" \".repeat(Math.max(0, widest - 5)) + \"  \" + total + \"\\n\";\n  return out;\n}\n"
+  },
+  "why": "the worse version does filtering, width measurement, formatting and totalling in one function with accumulator variables; the better one names each step (present, widestName, line) and the top-level function reads as the sequence the task describes",
+  "betterIsLonger": true
+}

@@ -5013,10 +5013,17 @@ class IntegrityTests(unittest.TestCase):
         section = section_of(report, cb.SECTION_RUBRIC)
         self.assertIn(cb.RUBRIC_CRITERIA[0], section)
         self.assertIn(row["findings"][0], section)
+        # Who scored a record decides what its median means. A person's records
+        # and a model judge's average together into a number with no single
+        # reading, and nothing else in the report would show that it happened.
+        self.assertIn(row["reviewer"], section)
+        self.assertIn("Higher is better", section)
         bare = cb.render_report(
             results, self.tasks, models=[SENTINEL_MODEL], arms=cb.ARMS, reps=3
         )
         self.assertIn(cb.NA, section_of(bare, cb.SECTION_RUBRIC))
+        self.assertNotIn("Scored by:", section_of(bare, cb.SECTION_RUBRIC),
+                         "no records means no reviewer to name")
 
 
 class ModuleHygieneTests(unittest.TestCase):
