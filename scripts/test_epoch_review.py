@@ -13,7 +13,15 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 
-from epoch_review import Turn, cell_paths, phase_rows, read_turns, source_files
+from epoch_review import (
+    Turn,
+    cell_paths,
+    clip,
+    phase_rows,
+    read_turns,
+    source_files,
+    transcript_lines,
+)
 
 
 def _db(path: Path, messages, parts=()):
@@ -138,3 +146,94 @@ class SourceFilesTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TranscriptTest(unittest.TestCase):
+    """The turn table says a tool was called and what it cost. It does not say
+    what the model was thinking, what it passed, or what came back — and those
+    are the three things a reader trying to understand a run actually opens it
+    for. The data is in the store; only the renderer never reached for it.
+    """
+
+    def _turns(self, tmp):
+        db = Path(tmp) / "opencode.db"
+        _db(
+            db,
+            [("m1", "s_root", "task", True, 1,
+              {"role": "assistant", "time": {"created": 0, "completed": 1000},
+               "tokens": {"output": 5, "input": 7}})],
+            [("m1", "s_root", {"type": "reasoning", "text": "I should read the file first."}),
+             ("m1", "s_root", {"type": "tool", "tool": "read",
+                               "state": {"status": "completed",
+                                         "input": {"filePath": "/repo/src/x.ts"},
+                                         "output": "export const f = 1;"}}),
+             ("m1", "s_root", {"type": "text", "text": "Done."})],
+        )
+        return read_turns(db)
+
+    def test_reasoning_is_read_out_of_the_store(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            turns = self._turns(tmp)
+            self.assertEqual(turns[0].reasoning, ["I should read the file first."])
+
+    def test_a_tool_call_carries_what_went_in_and_what_came_back(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            call = self._turns(tmp)[0].calls[0]
+            self.assertEqual(call.name, "read")
+            self.assertIn("x.ts", call.input)
+            self.assertIn("export const f = 1;", call.output)
+
+    def test_the_assistant_s_own_words_are_kept_apart_from_its_reasoning(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            turn = self._turns(tmp)[0]
+            self.assertEqual(turn.text, ["Done."])
+            self.assertNotIn("Done.", turn.reasoning)
+
+    def test_the_transcript_renders_all_three(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            body = "\n".join(transcript_lines(self._turns(tmp)))
+            for expected in ("I should read the file first.", "read", "x.ts",
+                             "export const f = 1;", "Done."):
+                self.assertIn(expected, body)
+
+    def test_clipping_is_announced_and_names_what_was_lost(self):
+        """A silently shortened tool output reads as a short output, and a reader
+        draws conclusions from the difference."""
+        clipped = clip("x" * 500, 100)
+        self.assertIn("truncated", clipped)
+        self.assertIn("500", clipped, "the reader is told how much there was")
+        self.assertLess(len(clipped), 300)
+
+    def test_short_content_is_left_exactly_alone(self):
+        self.assertEqual(clip("short", 100), "short")
+
+    def test_a_turn_that_did_no_thinking_says_so_rather_than_rendering_nothing(self):
+        """An absent reasoning block and a reasoning block nobody rendered look
+        identical in the output, and only one of them is a fact about the run."""
+        turn = Turn(session="s", session_id="s", agent="a", seconds=1.0,
+                    out_tokens=1, in_tokens=1)
+        body = "\n".join(transcript_lines([turn]))
+        self.assertIn("no reasoning", body.lower())
+
+
+class TranscriptAlwaysRendersTest(unittest.TestCase):
+    """A cell that produced no code is the cell whose transcript matters most.
+
+    The first wiring put section 4 after an early `continue` in the code section,
+    so an arm that left the seed untouched — or whose tree was never archived —
+    silently lost its transcript. Epoch 14's conductor arm did exactly that on
+    three of four tasks, and "what did it do for sixty minutes" is the only
+    question left to ask about those cells.
+    """
+
+    def test_the_render_has_no_early_exit_before_the_transcript(self):
+        import inspect
+        import epoch_review
+        body = inspect.getsource(epoch_review.render_epoch)
+        head, _, tail = body.partition("4 \u00b7 The transcript")
+        self.assertTrue(tail, "the transcript section must exist")
+        after_code_heading = head.split("2 \u00b7 The resulting code")[-1]
+        self.assertNotIn("continue", after_code_heading,
+                         "an early continue between the code section and the "
+                         "transcript drops the transcript for exactly the arms "
+                         "that produced nothing")

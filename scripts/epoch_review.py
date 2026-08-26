@@ -103,6 +103,16 @@ def commits_between(start: Optional[datetime], end: datetime) -> List[Change]:
 # ---------------------------------------------------------------------------
 
 @dataclass
+class ToolCall:
+    """One tool call as the model made it: the name, what went in, what came back."""
+
+    name: str
+    input: str
+    output: str
+    status: str
+
+
+@dataclass
 class Turn:
     session: str
     session_id: str
@@ -111,6 +121,34 @@ class Turn:
     out_tokens: int
     in_tokens: int
     tools: List[str] = field(default_factory=list)
+    # The three things the phase table cannot carry. They sit in the session
+    # store beside the timings and were simply never read out of it.
+    reasoning: List[str] = field(default_factory=list)
+    text: List[str] = field(default_factory=list)
+    calls: List[ToolCall] = field(default_factory=list)
+
+
+# Per rendered block. A transcript is the largest thing this document holds — one
+# conductor cell carries hundreds of reasoning blocks — so it is bounded, and
+# every cut says how much it cut.
+REASONING_CHARS = 4000
+TOOL_INPUT_CHARS = 600
+TOOL_OUTPUT_CHARS = 1200
+
+
+def clip(text: str, limit: int) -> str:
+    """`text`, or its first `limit` characters with the loss stated.
+
+    Silently shortening a tool result reads as a short result, and a reader
+    comparing two arms draws a conclusion from the difference. The marker carries
+    the true length so the difference stays visible.
+    """
+    if text is None:
+        return ""
+    if len(text) <= limit:
+        return text
+    return "%s\n… (truncated: %d of %d characters shown)" % (
+        text[:limit], limit, len(text))
 
 
 def read_turns(db: Path) -> List[Turn]:
@@ -131,13 +169,30 @@ def read_turns(db: Path) -> List[Turn]:
         ):
             titles[sid] = "orchestrator (root session)" if is_root else (title or "")
         tools: Dict[str, List[str]] = {}
+        reasoning: Dict[str, List[str]] = {}
+        texts: Dict[str, List[str]] = {}
+        calls: Dict[str, List[ToolCall]] = {}
         for mid, data in conn.execute("select message_id, data from part"):
             try:
                 part = json.loads(data)
             except (json.JSONDecodeError, TypeError):
                 continue
-            if part.get("type") == "tool" and part.get("tool"):
+            kind = part.get("type")
+            if kind == "tool" and part.get("tool"):
                 tools.setdefault(mid, []).append(str(part["tool"]))
+                state = part.get("state") or {}
+                raw_input = state.get("input")
+                calls.setdefault(mid, []).append(ToolCall(
+                    name=str(part["tool"]),
+                    input=(json.dumps(raw_input, indent=1) if isinstance(raw_input, (dict, list))
+                           else str(raw_input or "")),
+                    output=str(state.get("output") or ""),
+                    status=str(state.get("status") or ""),
+                ))
+            elif kind == "reasoning" and part.get("text"):
+                reasoning.setdefault(mid, []).append(str(part["text"]))
+            elif kind == "text" and part.get("text"):
+                texts.setdefault(mid, []).append(str(part["text"]))
         turns: List[Turn] = []
         rows = conn.execute(
             "select id, session_id, data from message order by time_created"
@@ -169,8 +224,55 @@ def read_turns(db: Path) -> List[Turn]:
             out_tokens=int(tok.get("output") or 0),
             in_tokens=int(tok.get("input") or 0),
             tools=tools.get(mid, []),
+            reasoning=reasoning.get(mid, []),
+            text=texts.get(mid, []),
+            calls=calls.get(mid, []),
         ))
     return turns
+
+
+def transcript_lines(turns: Sequence[Turn]) -> List[str]:
+    """Every turn as it happened: what it thought, what it called, what it said.
+
+    The phase table above answers what a run COST. This answers what it DID, which
+    is the question anyone comparing two arms is actually asking and the one no
+    aggregate can reach.
+    """
+    lines: List[str] = []
+    for index, turn in enumerate(turns, start=1):
+        head = "**turn %d** · `%s`" % (index, turn.session or turn.agent or "(unnamed)")
+        lines.append("%s · %.0fs · %d tokens out" % (head, turn.seconds, turn.out_tokens))
+        lines.append("")
+        if turn.reasoning:
+            for block in turn.reasoning:
+                lines.append("> **thinking**")
+                for row in clip(block, REASONING_CHARS).splitlines():
+                    lines.append("> %s" % row)
+                lines.append("")
+        else:
+            # An absent reasoning block and one nobody rendered look identical,
+            # and only one of them is a fact about the run.
+            lines.append("> _no reasoning recorded for this turn_")
+            lines.append("")
+        for call in turn.calls:
+            lines.append("**tool `%s`**%s" % (
+                call.name, "" if call.status in ("completed", "") else " · %s" % call.status))
+            lines.append("")
+            lines.append("_input_")
+            lines.append("```")
+            lines.append(clip(call.input, TOOL_INPUT_CHARS))
+            lines.append("```")
+            lines.append("_output_")
+            lines.append("```")
+            lines.append(clip(call.output, TOOL_OUTPUT_CHARS))
+            lines.append("```")
+            lines.append("")
+        for said in turn.text:
+            lines.append("**said**")
+            lines.append("")
+            lines.append(clip(said, REASONING_CHARS))
+            lines.append("")
+    return lines
 
 
 def phase_rows(turns: Sequence[Turn], by_session: bool) -> List[Tuple[str, int, int, float, int, int]]:
@@ -296,7 +398,7 @@ def verdict(record: Optional[dict]) -> str:
 
 
 def render_epoch(results_dir: Path, work_root: Path, index: int,
-                 previous: Optional[datetime]) -> str:
+                 previous: Optional[datetime], transcripts: bool = True) -> str:
     started = epoch_start(results_dir)
     results = load_results(results_dir)
     manifest = manifest_at(commit_at(started))
@@ -381,23 +483,39 @@ def render_epoch(results_dir: Path, work_root: Path, index: int,
                       f"| **{sum(r[4] for r in rows):,}** | |")
                     w("")
 
+            # No early exit below this point: an arm that produced nothing is the
+            # arm whose transcript a reader most needs, and a `continue` here
+            # drops it for exactly those cells.
             w("#### 2 · The resulting code\n")
             if repo is None:
                 w("_Not preserved. `run_and_watch.py` clears the work root at the start of "
                   "every run, so this epoch's trees were destroyed when the next one "
                   "launched._\n")
-                continue
-            produced = source_files(repo)
-            seeds = entry.get("seedFiles") or {}
-            changed = {p: b for p, b in produced.items() if p not in seeds or seeds[p] != b}
-            if not changed:
-                w("**Unchanged from the seed — this arm produced no code.**\n")
-                continue
-            for path, body in sorted(changed.items()):
-                w(f"`{path}` ({'created' if path not in seeds else 'modified'})\n")
-                w(f"```{fence(path)}")
-                w(body.rstrip("\n") if body.strip() else "(empty)")
-                w("```\n")
+            else:
+                produced = source_files(repo)
+                seeds = entry.get("seedFiles") or {}
+                changed = {p: b for p, b in produced.items() if p not in seeds or seeds[p] != b}
+                if not changed:
+                    w("**Unchanged from the seed — this arm produced no code.**\n")
+                for path, body in sorted(changed.items()):
+                    w(f"`{path}` ({'created' if path not in seeds else 'modified'})\n")
+                    w(f"```{fence(path)}")
+                    w(body.rstrip("\n") if body.strip() else "(empty)")
+                    w("```\n")
+
+            w("#### 4 · The transcript\n")
+            if not transcripts:
+                # Omitting the section silently would read as "this arm did
+                # nothing worth showing", which is a different claim entirely.
+                w("_Omitted: this document was generated with `--no-transcripts`._\n")
+            elif not turns:
+                w("_No session store was archived for this cell, so there is no "
+                  "transcript to show. Epochs before tree archiving landed have "
+                  "prompts, outcomes and timings but no turns._\n")
+            else:
+                for line in transcript_lines(turns):
+                    w(line)
+                w("")
     return "\n".join(out)
 
 
@@ -407,6 +525,9 @@ def main() -> int:
     ap.add_argument("--work-root", type=Path, default=Path.home() / ".llama-leash-work")
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--since", default="", help="only epochs at or after this directory name")
+    ap.add_argument("--no-transcripts", action="store_true", dest="no_transcripts",
+                    help="omit per-turn reasoning, tool calls and tool output; the "
+                         "document says so where they would have been")
     args = ap.parse_args()
 
     epochs = sorted(d for d in args.watch_root.iterdir()
@@ -426,7 +547,11 @@ def main() -> int:
     head.append("2. **The resulting code**, in full, for each arm.")
     head.append("3. **Time and tokens by phase** — real sub-sessions for `conductor`, "
                 "per-turn for `baseline`, which has no phase structure to group.")
-    head.append("4. **The changes committed** since the previous epoch.\n")
+    head.append("4. **The transcript** of every turn — what the model was thinking, "
+                "which tools it called with which arguments, what came back, and what "
+                "it said. Long blocks are clipped and every clip states how much it "
+                "cut.")
+    head.append("5. **The changes committed** since the previous epoch.\n")
     for arm in ARMS:
         head.append(f"- **`{arm}`** — {ARM_BLURB[arm]}")
     head.append("")
@@ -438,7 +563,8 @@ def main() -> int:
     body: List[str] = []
     previous: Optional[datetime] = None
     for i, d in enumerate(epochs, 1):
-        body.append(render_epoch(d, args.work_root, i, previous))
+        body.append(render_epoch(d, args.work_root, i, previous,
+                                 transcripts=not args.no_transcripts))
         previous = epoch_start(d)
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
