@@ -98,6 +98,30 @@ DEFAULT_MAX_TOKENS = 6000
 # busy through a whole campaign epoch.
 DEFAULT_CONCURRENCY = 3
 
+# The slowest per-slot generation observed while three slots were busy on real
+# trees was 5.12 t/s. The floor is set under that so a timeout derived from it
+# still covers a call that runs slower than anything yet measured.
+FLOOR_TOKENS_PER_SECOND = 4.0
+
+# Prefill, queueing behind other slots, and the request round trip, none of which
+# is generation and all of which happens before the first token.
+FIXED_OVERHEAD_SECONDS = 120.0
+
+
+def minimum_timeout(max_tokens: int,
+                    rate: float = FLOOR_TOKENS_PER_SECOND) -> float:
+    """The wall clock a call needs if it spends its whole budget generating.
+
+    A timeout below this truncates by construction, so it is derived rather than
+    chosen. Run 1 failed on a token budget too small to answer in; run 2 raised
+    the budget and failed on a timeout too small to spend it in. Two constants
+    that must agree, set independently — which is D42's shape exactly.
+    """
+    return FIXED_OVERHEAD_SECONDS + (max_tokens / rate)
+
+
+DEFAULT_TIMEOUT = minimum_timeout(DEFAULT_MAX_TOKENS)
+
 
 class JudgeUnusable(RuntimeError):
     """The call completed and carried no answer, with the reason it carried none.
@@ -944,7 +968,7 @@ def _length_bias(longer: Sequence[CaseOutcome], shorter: Sequence[CaseOutcome]) 
 # The live judge
 # ---------------------------------------------------------------------------
 
-def http_judge(endpoint: str, model: str, timeout: float = 600.0,
+def http_judge(endpoint: str, model: str, timeout: float = DEFAULT_TIMEOUT,
                temperature: float = 0.3, max_tokens: int = DEFAULT_MAX_TOKENS,
                priority: str = "batch") -> Judge:
     """A judge that talks to an OpenAI-compatible endpoint, one seed per call.
@@ -953,7 +977,18 @@ def http_judge(endpoint: str, model: str, timeout: float = 600.0,
     in front of it. It does not make judging free: the calls still occupy the
     same weights, so a run started during a measured epoch perturbs that epoch's
     wall clock, which is one of the numbers the campaign reports.
+
+    Refuses a timeout that cannot cover `max_tokens`, because that pair truncates
+    every call that uses its budget and reports it as a judgement failure.
     """
+    needed = minimum_timeout(max_tokens)
+    if timeout < needed:
+        raise ValueError(
+            "timeout %.0fs cannot cover max_tokens %d: at the %.1f tok/s floor "
+            "that budget needs %.0fs, so every call spending it would be killed "
+            "and reported as the judge failing. Raise --timeout to at least %.0f "
+            "or lower --max-tokens." % (timeout, max_tokens,
+                                        FLOOR_TOKENS_PER_SECOND, needed, needed))
 
     def call(prompt: str, seed: int) -> str:
         payload = {
@@ -1267,7 +1302,9 @@ def main() -> int:
                         help="judge without first checking the judge (records it in the report)")
     parser.add_argument("--out", type=Path)
     parser.add_argument("--write-rubrics", action="store_true")
-    parser.add_argument("--timeout", type=float, default=600.0)
+    parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT,
+                        help="derived from --max-tokens and a floor generation "
+                             "rate; a smaller value is refused")
     parser.add_argument("--max-tokens", type=int, default=DEFAULT_MAX_TOKENS,
                         dest="max_tokens",
                         help="answer budget; a thinking model spends most of it "

@@ -6,22 +6,22 @@ No ratio appears here: rubric scores have no true zero.
 
 ## Judge calibration
 
-calibrated: 6/6 on known-answer cases
+calibrated: 9/9 on known-answer cases
 
-- known-answer accuracy: 6/6 (100%), stated floor 75%
-- length bias: better-is-longer 100% (3 cases) vs better-is-shorter 100% (3 cases)
+- known-answer accuracy: 9/9 (100%), stated floor 75%
+- length bias: better-is-longer 100% (5 cases) vs better-is-shorter 100% (4 cases)
 - identical-pair control: clean
-- control detail: deadcode-unused-scaffold 6/6 runs scored two identical trees equally; decomposition-one-long-blob 6/6 runs scored two identical trees equally; overbuilding-strategy-registry 6/6 runs scored two identical trees equally; structure-drops-a-named-case 2/2 runs scored two identical trees equally; testquality-asserts-nothing 4/4 runs scored two identical trees equally; testquality-restates-the-implementation 4/4 runs scored two identical trees equally
+- control detail: deadcode-unused-scaffold 6/6 runs scored two identical trees equally; decomposition-one-long-blob 6/6 runs scored two identical trees equally; large-deadcode-unused-module 6/6 runs scored two identical trees equally; large-structure-ignores-the-pinned-clock 6/6 runs scored two identical trees equally; large-testquality-vacuous-suite 4/4 runs scored two identical trees equally; overbuilding-strategy-registry 6/6 runs scored two identical trees equally; structure-drops-a-named-case 2/2 runs scored two identical trees equally; testquality-asserts-nothing 4/4 runs scored two identical trees equally; testquality-restates-the-implementation 4/4 runs scored two identical trees equally
 
 ## `clock-inject-py`
 
 | pair | criterion | verdict | why |
 |---|---|---|---|
-| baseline vs doctrine | structure | _NO VERDICT_ | 1 of 6 responses were unusable (the judge spent its whole token budget reasoning and never answered (finish_reason=length, 0 answer chars after 13646 reasoning chars) — raise max_tokens above 3000) — an instrument failure, not a tie |
+| baseline vs doctrine | structure | _NO VERDICT_ | 2 of 6 responses were unusable (the judge call failed: timed out) — an instrument failure, not a tie |
 | baseline vs doctrine | decomposition | tie | unanimous over 6 runs in both orders: no difference |
 | baseline vs doctrine | testQuality | **doctrine** | won every one of 6 runs in both presentation orders |
-| baseline vs doctrine | deadCode | _NO VERDICT_ | 2 of 6 responses were unusable (the judge spent its whole token budget reasoning and never answered (finish_reason=length, 0 answer chars after 13167 reasoning chars) — raise max_tokens above 3000; the judge spent its whole token budget reasoning and never answered (finish_reason=length, 0 answer chars after 13408 reasoning chars) — raise max_tokens above 3000) — an instrument failure, not a tie |
-| baseline vs doctrine | overBuilding | _NO VERDICT_ | 1 of 6 responses were unusable (the judge spent its whole token budget reasoning and never answered (finish_reason=length, 0 answer chars after 13858 reasoning chars) — raise max_tokens above 3000) — an instrument failure, not a tie |
+| baseline vs doctrine | deadCode | _NO VERDICT_ | 1 of 6 responses were unusable (the judge call failed: timed out) — an instrument failure, not a tie |
+| baseline vs doctrine | overBuilding | _NO VERDICT_ | 1 of 6 responses were unusable (the judge call failed: timed out) — an instrument failure, not a tie |
 | baseline vs conductor | structure | _NO WORK_ | NO WORK: conductor left the seed byte-identical, so there is no implementation to judge — this is the outcome the pass/fail already records, not a quality result |
 | baseline vs conductor | decomposition | _NO WORK_ | NO WORK: conductor left the seed byte-identical, so there is no implementation to judge — this is the outcome the pass/fail already records, not a quality result |
 | baseline vs conductor | testQuality | _NO WORK_ | NO WORK: conductor left the seed byte-identical, so there is no implementation to judge — this is the outcome the pass/fail already records, not a quality result |
@@ -40,10 +40,10 @@ Blinding notes for this task:
 
 | pair | criterion | verdict | why |
 |---|---|---|---|
-| baseline vs doctrine | structure | _NO VERDICT_ | 5 of 6 responses were unusable (the judge spent its whole token budget reasoning and never answered (finish_reason=length, 0 answer chars after 12448 reasoning chars) — raise max_tokens above 3000; the judge spent its whole token budget reasoning and never answered (finish_reason=length, 0 answer chars after 12634 reasoning chars) — raise max_tokens above 3000; the judge spent its whole token budget reasoning and never answered (finish_reason=length, 0 answer chars after 12643 reasoning chars) — raise max_tokens above 3000; the judge spent its whole token budget reasoning and never answered (finish_reason=length, 0 answer chars after 12665 reasoning chars) — raise max_tokens above 3000; the judge spent its whole token budget reasoning and never answered (finish_reason=length, 0 answer chars after 12677 reasoning chars) — raise max_tokens above 3000) — an instrument failure, not a tie |
-| baseline vs doctrine | decomposition | _NO VERDICT_ | 1 of 6 responses were unusable (the judge spent its whole token budget reasoning and never answered (finish_reason=length, 0 answer chars after 12721 reasoning chars) — raise max_tokens above 3000) — an instrument failure, not a tie |
+| baseline vs doctrine | structure | _NO VERDICT_ | 6 of 6 responses were unusable (the judge call failed: timed out) — an instrument failure, not a tie |
+| baseline vs doctrine | decomposition | _NO VERDICT_ | 6 of 6 responses were unusable (the judge call failed: timed out) — an instrument failure, not a tie |
 | baseline vs doctrine | testQuality | tie | unanimous over 6 runs in both orders: no difference |
-| baseline vs doctrine | deadCode | _NO VERDICT_ | 1 of 6 responses were unusable (the judge spent its whole token budget reasoning and never answered (finish_reason=length, 0 answer chars after 12459 reasoning chars) — raise max_tokens above 3000) — an instrument failure, not a tie |
+| baseline vs doctrine | deadCode | _NO VERDICT_ | 1 of 6 responses were unusable (the judge call failed: timed out) — an instrument failure, not a tie |
 | baseline vs doctrine | overBuilding | **baseline** | won every one of 6 runs in both presentation orders |
 | baseline vs conductor | structure | _NO WORK_ | NO WORK: conductor left the seed byte-identical, so there is no implementation to judge — this is the outcome the pass/fail already records, not a quality result |
 | baseline vs conductor | decomposition | _NO WORK_ | NO WORK: conductor left the seed byte-identical, so there is no implementation to judge — this is the outcome the pass/fail already records, not a quality result |
@@ -63,8 +63,8 @@ Blinding notes for this task:
 
 | pair | criterion | verdict | why |
 |---|---|---|---|
-| baseline vs doctrine | structure | _NO VERDICT_ | 4 of 6 responses were unusable (the judge spent its whole token budget reasoning and never answered (finish_reason=length, 0 answer chars after 13073 reasoning chars) — raise max_tokens above 3000; the judge spent its whole token budget reasoning and never answered (finish_reason=length, 0 answer chars after 13413 reasoning chars) — raise max_tokens above 3000; the judge spent its whole token budget reasoning and never answered (finish_reason=length, 0 answer chars after 13442 reasoning chars) — raise max_tokens above 3000; the judge spent its whole token budget reasoning and never answered (finish_reason=length, 0 answer chars after 13613 reasoning chars) — raise max_tokens above 3000) — an instrument failure, not a tie |
-| baseline vs doctrine | decomposition | _NO VERDICT_ | 1 of 6 responses were unusable (the judge spent its whole token budget reasoning and never answered (finish_reason=length, 0 answer chars after 13403 reasoning chars) — raise max_tokens above 3000) — an instrument failure, not a tie |
+| baseline vs doctrine | structure | _NO VERDICT_ | 4 of 6 responses were unusable (the judge call failed: timed out) — an instrument failure, not a tie |
+| baseline vs doctrine | decomposition | _NO VERDICT_ | 3 of 6 responses were unusable (the judge call failed: timed out) — an instrument failure, not a tie |
 | baseline vs doctrine | testQuality | **doctrine** | won every one of 6 runs in both presentation orders |
 | baseline vs doctrine | deadCode | tie | unanimous over 6 runs in both orders: no difference |
 | baseline vs doctrine | overBuilding | tie | unanimous over 6 runs in both orders: no difference |
@@ -89,18 +89,18 @@ Blinding notes for this task:
 | baseline vs doctrine | structure | _NO VERDICT_ | 2 of 6 responses were unusable (the JSON object did not parse: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)) — an instrument failure, not a tie |
 | baseline vs doctrine | decomposition | tie | unanimous over 6 runs in both orders: no difference |
 | baseline vs doctrine | testQuality | **doctrine** | won every one of 6 runs in both presentation orders |
-| baseline vs doctrine | deadCode | _NO VERDICT_ | 1 of 6 responses were unusable (the judge spent its whole token budget reasoning and never answered (finish_reason=length, 0 answer chars after 13252 reasoning chars) — raise max_tokens above 3000) — an instrument failure, not a tie |
+| baseline vs doctrine | deadCode | tie | the judge disagreed with itself across 6 runs (baseline, tie) — reported as a tie rather than resolved by picking one |
 | baseline vs doctrine | overBuilding | tie | the judge disagreed with itself across 6 runs (baseline, tie) — reported as a tie rather than resolved by picking one |
 | baseline vs conductor | structure | _NO VERDICT_ | 2 of 6 responses were unusable (the JSON object did not parse: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)) — an instrument failure, not a tie |
 | baseline vs conductor | decomposition | **baseline** | won every one of 6 runs in both presentation orders |
-| baseline vs conductor | testQuality | _NO VERDICT_ | 1 of 6 responses were unusable (the JSON object did not parse: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)) — an instrument failure, not a tie |
+| baseline vs conductor | testQuality | _NO VERDICT_ | 1 of 6 responses were unusable (the judge call failed: timed out) — an instrument failure, not a tie |
 | baseline vs conductor | deadCode | tie | unanimous over 6 runs in both orders: no difference |
-| baseline vs conductor | overBuilding | _NO VERDICT_ | 1 of 6 responses were unusable (the judge spent its whole token budget reasoning and never answered (finish_reason=length, 0 answer chars after 13677 reasoning chars) — raise max_tokens above 3000) — an instrument failure, not a tie |
+| baseline vs conductor | overBuilding | tie | unanimous over 6 runs in both orders: no difference |
 | doctrine vs conductor | structure | **doctrine** | won every one of 6 runs in both presentation orders |
 | doctrine vs conductor | decomposition | **doctrine** | won every one of 6 runs in both presentation orders |
-| doctrine vs conductor | testQuality | _NO VERDICT_ | 6 of 6 responses were unusable (the judge spent its whole token budget reasoning and never answered (finish_reason=length, 0 answer chars after 13063 reasoning chars) — raise max_tokens above 3000; the judge spent its whole token budget reasoning and never answered (finish_reason=length, 0 answer chars after 13650 reasoning chars) — raise max_tokens above 3000; the judge spent its whole token budget reasoning and never answered (finish_reason=length, 0 answer chars after 13795 reasoning chars) — raise max_tokens above 3000; the judge spent its whole token budget reasoning and never answered (finish_reason=length, 0 answer chars after 13894 reasoning chars) — raise max_tokens above 3000; the judge spent its whole token budget reasoning and never answered (finish_reason=length, 0 answer chars after 13909 reasoning chars) — raise max_tokens above 3000; the judge spent its whole token budget reasoning and never answered (finish_reason=length, 0 answer chars after 14086 reasoning chars) — raise max_tokens above 3000) — an instrument failure, not a tie |
-| doctrine vs conductor | deadCode | _NO VERDICT_ | 1 of 6 responses were unusable (the judge spent its whole token budget reasoning and never answered (finish_reason=length, 0 answer chars after 13106 reasoning chars) — raise max_tokens above 3000) — an instrument failure, not a tie |
-| doctrine vs conductor | overBuilding | _NO VERDICT_ | 1 of 6 responses were unusable (the judge spent its whole token budget reasoning and never answered (finish_reason=length, 0 answer chars after 13981 reasoning chars) — raise max_tokens above 3000) — an instrument failure, not a tie |
+| doctrine vs conductor | testQuality | _NO VERDICT_ | 6 of 6 responses were unusable (the judge call failed: timed out) — an instrument failure, not a tie |
+| doctrine vs conductor | deadCode | _NO VERDICT_ | 3 of 6 responses were unusable (the judge call failed: timed out) — an instrument failure, not a tie |
+| doctrine vs conductor | overBuilding | tie | unanimous over 6 runs in both orders: no difference |
 
 Blinding notes for this task:
 - 2 further archived repetition(s) of this task were not judged: llamacpp-qwen3.8-27b/none/baseline/slugify-ts/r2, llamacpp-qwen3.8-27b/none/baseline/slugify-ts/r3

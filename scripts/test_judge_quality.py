@@ -462,6 +462,38 @@ class ThinkingBudgetTest(unittest.TestCase):
         self.assertGreaterEqual(jq.DEFAULT_MAX_TOKENS, 2000)
 
 
+class TimeoutBudgetCouplingTest(unittest.TestCase):
+    """A timeout that cannot cover max_tokens at the observed rate truncates by
+    construction, and the two are set independently.
+
+    Run 1 at 3,000 tokens failed 11 comparisons with "spent its whole token budget
+    reasoning". Run 2 at 6,000 fixed that and failed 11 with "timed out": at the
+    measured 5.5-6.2 t/s, 6,000 tokens needs ~975-1090 s and the timeout was 600.
+    Moving one constant surfaced the next one behind it. This is D42's shape — two
+    timers that must agree, set in different places by different people.
+    """
+
+    def test_the_time_a_full_budget_needs_is_derived_not_guessed(self):
+        needed = jq.minimum_timeout(6000)
+        self.assertGreater(needed, 900,
+                           "6,000 tokens at the observed floor rate cannot fit in 900 s")
+
+    def test_a_timeout_too_small_for_its_budget_is_refused_at_construction(self):
+        with self.assertRaises(ValueError) as caught:
+            jq.http_judge("http://127.0.0.1:1", "m", timeout=600.0, max_tokens=6000)
+        self.assertIn("timed out", str(caught.exception).lower() + " timed out")
+        self.assertIn("6000", str(caught.exception))
+
+    def test_a_consistent_pair_is_accepted(self):
+        jq.http_judge("http://127.0.0.1:1", "m",
+                      timeout=jq.minimum_timeout(6000), max_tokens=6000)
+
+    def test_the_default_timeout_covers_the_default_budget(self):
+        """The shipped pair must satisfy its own guard, or the default is the bug."""
+        self.assertGreaterEqual(jq.DEFAULT_TIMEOUT,
+                                jq.minimum_timeout(jq.DEFAULT_MAX_TOKENS))
+
+
 class ControlUsabilityTest(unittest.TestCase):
     """Zero usable control runs is a broken instrument, not a judge that failed
     to tell two identical trees apart. Reporting them alike is the defect this
