@@ -266,6 +266,20 @@ EMPTY_RUN_REQUESTS = 0
 # `gauge` answers "was the work correct", and a cell that ran out of clock while
 # holding a correct solution is the case that needs both. Scoring only the cells
 # that finished makes "could not do it" and "would not stop" the same number.
+# How long a verify may run before it is a hang rather than a suite (R5).
+#
+# This was `run_timeout_sec * 1000` — the cell's ENTIRE wall clock, handed to a
+# command that runs a unit suite in milliseconds (grid2048's visible suite: 23
+# tests in 0.001s). Merely silly at a 45-minute cell; with the sub-session
+# deadlines off for measurement and the cell budget at eight hours it became a
+# hung subprocess's licence to eat the whole run.
+#
+# A verify is NOT a model call. It is a local process that finishes in seconds
+# or is broken, which makes it the one deadline in this configuration worth
+# keeping — and it must not be derived from the budget it exists to protect.
+# Ten minutes is three orders of magnitude over any suite measured here.
+VERIFY_TIMEOUT_MS = 600000
+
 GAUGE_KEYS = ("ran", "passed", "exitCode")
 
 SWEEP_REQUIRED_KEYS = (
@@ -1914,7 +1928,7 @@ def build_conductor_cell_config(task: Task) -> Dict[str, Any]:
             "scopes": {
                 "repo": {
                     "command": command,
-                    "timeoutMs": task.run_timeout_sec * 1000,
+                    "timeoutMs": VERIFY_TIMEOUT_MS,
                     "itemTest": command,
                 }
             },

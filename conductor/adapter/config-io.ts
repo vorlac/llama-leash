@@ -53,7 +53,10 @@ export interface LoadedConfig {
 // reads conductor_wiring.py at test time and asserts the equality, so a drift is
 // caught rather than assumed away.
 const DEFAULT_MAX_READERS = 6;
-const SUB_SESSION_TIMEOUT_MS = 900000;
+// MEASUREMENT SETTING — mirrors scripts/conductor_wiring.py, which carries the
+// reasoning. composition.test.ts asserts the two agree, so this is not a second
+// source of truth, it is the same one spelled where TypeScript can read it.
+const SUB_SESSION_TIMEOUT_MS = 21600000;
 
 // Per-role deadlines, from 75 completed dispatches and 24 watchdog deaths on the
 // benchmarked local model. The global above stays the fallback for every role
@@ -77,9 +80,9 @@ const SUB_SESSION_TIMEOUT_MS = 900000;
 // timeout reports as itself instead of racing a sub-session watchdog to the same
 // instant and producing two error stories for one event.
 const ROLE_TIMEOUT_MS: Record<string, number> = {
-  mechanical: 720000,
-  skeptic: 720000,
-  planner: 1200000,
+  mechanical: 21600000,
+  skeptic: 21600000,
+  planner: 21600000,
 };
 
 // Freeze a value and everything reachable from it, so the exported default

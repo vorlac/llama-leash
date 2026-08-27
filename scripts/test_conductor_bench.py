@@ -5534,3 +5534,39 @@ class ArchiveCellTreeTests(unittest.TestCase):
         cb.archive_cell_tree(dest, self.cell, work)
         self.assertFalse((root / "repo" / "src" / "ghost.ts").exists())
         self.assertTrue((root / "repo" / "src" / "slugify.ts").exists())
+
+
+class VerifyTimeoutIsNotTheCellBudget(unittest.TestCase):
+    """R5: a verify allowed the whole cell budget is not a timeout.
+
+    `verify.scopes.repo.timeoutMs` was `run_timeout_sec * 1000` — the cell's
+    entire wall clock, handed to a command that runs a unit suite in
+    milliseconds (grid2048's visible suite: 23 tests in 0.001s). It was merely
+    silly while a cell was 45 minutes. With the sub-session deadlines off for
+    measurement and the cell budget raised to eight hours, it became a hung
+    subprocess's licence to eat the whole run.
+
+    A verify is not a model call. It is a local process that finishes in seconds
+    or is broken, so it is the ONE place in this configuration that keeps a real
+    deadline — and it must not be derived from the budget it is meant to protect.
+    """
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="cbench-verify-"))
+        self.addCleanup(shutil.rmtree, str(self.tmp), True)
+        self.tasks = fixture_tasks(self.tmp)
+
+    def test_the_verify_timeout_does_not_track_the_cell_budget(self):
+        task = self.tasks[0]
+        with no_subprocess():
+            short = cb.build_conductor_cell_config(task._replace(run_timeout_sec=60))
+            long = cb.build_conductor_cell_config(task._replace(run_timeout_sec=28800))
+        a = short["verify"]["scopes"]["repo"]["timeoutMs"]
+        b = long["verify"]["scopes"]["repo"]["timeoutMs"]
+        self.assertEqual(a, b, "a 480x larger cell budget must not grant the verify 480x longer")
+        self.assertEqual(a, cb.VERIFY_TIMEOUT_MS)
+
+    def test_the_verify_timeout_is_generous_but_bounded(self):
+        """Three orders of magnitude over any measured suite, and far under a cell."""
+        self.assertGreaterEqual(cb.VERIFY_TIMEOUT_MS, 60_000)
+        self.assertLessEqual(cb.VERIFY_TIMEOUT_MS, 1_800_000)

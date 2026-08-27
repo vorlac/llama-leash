@@ -56,6 +56,15 @@ ROUTER_BINARY_RELPATHS = (
     ".data/tools/llama-router",
 )
 
+# What llama-router is actually built from. CMakeLists.txt compiles one
+# translation unit, router/main.cpp, against the header-only tree beside it, so
+# the sources that can change the binary's behaviour are router/*.hpp and
+# router/*.cpp. router/tests/ is excluded because those files link into
+# router-tests and never into llama-router.
+ROUTER_SOURCE_RELDIR = "router"
+ROUTER_SOURCE_SUFFIXES = (".hpp", ".cpp")
+ROUTER_TEST_RELDIR = "router/tests"
+
 DEFAULT_LISTEN_HOST = "127.0.0.1"
 DEFAULT_LISTEN_PORT = 8088
 ROUTER_HEALTH_PATH = "/conductor/health"
@@ -66,7 +75,41 @@ ROUTER_READY_TIMEOUT_S = 30.0
 # default as ONE literal. Task 12.2 writes .conductor/config.json and must use
 # the same number, or the two defaults drift with nothing to catch it.
 DEFAULT_MAX_READERS = 6
-SUB_SESSION_TIMEOUT_MS = 900000
+
+# ═════════════════════════════════════════════════════════════════════════════
+# MEASUREMENT SETTING — sub-session deadlines are effectively OFF.
+#
+# Every duration deadline below is six hours, which no roll on this rig can
+# reach: the ceiling exists only so a number is present where the schema wants
+# one, because "absent" and "expire immediately" are the same value on some
+# paths and that is not a thing to discover during a run.
+#
+# WHY. A deadline can only be sized against a distribution somebody has
+# observed, and this one has never been observed. 39% of planner dispatches were
+# killed, and a killed roll never reveals how long it WOULD have taken — every
+# figure in the calibration table below is a lower bound on a censored sample.
+# Six sightings across this campaign show the killed session generating at the
+# hardware's full rate and cut mid-sentence; none shows a deadline catching a
+# pathology. The instrument was removing the measurement.
+#
+# WHAT STILL GUARDS THE RUN, because this is not "no timeouts":
+#   - router/router.hpp kRelayTimeoutSeconds (600) is a PER-READ timeout, so a
+#     session that genuinely stops emitting dies after 600s of silence. That is
+#     a liveness signal, which is the correct shape, and it has never fired on
+#     healthy work.
+#   - the cell's own tier budget remains as the single outer bound, and is the
+#     only thing that stops a run looping in the FSM where every turn emits
+#     tokens and the relay guard therefore never sees silence.
+#
+# Restoring a real deadline is the point of running this way: the tail becomes
+# observable for the first time, and a number fitted to it will be a measurement
+# rather than the guess this replaces.
+# ═════════════════════════════════════════════════════════════════════════════
+# Spelled as a literal, here and in the map below, because
+# conductor/tests/composition.test.ts reads THIS FILE and compares the numbers
+# against config-io.ts's mirror. A named constant reads better and defeats that
+# cross-language check, which is worth more than the name.
+SUB_SESSION_TIMEOUT_MS = 21600000
 
 # Per-role deadlines, from 75 completed dispatches and 24 watchdog deaths on the
 # benchmarked local model. SUB_SESSION_TIMEOUT_MS above stays the fallback for
@@ -87,15 +130,18 @@ SUB_SESSION_TIMEOUT_MS = 900000
 # 720000 keeps 40% headroom over the slowest measured skeptic success (8m27) and
 # is still three minutes better than the 900000 it replaces.
 ROLE_TIMEOUT_MS = {
-    "mechanical": 720000,
-    "skeptic": 720000,
-    "planner": 1200000,
+    "mechanical": 21600000,
+    "skeptic": 21600000,
+    "planner": 21600000,
 }
 
 # plan:639-669 (§2.2), the hand-editable half of the generated router config.
 ROUTER_CONFIG_VERSION = 1
 ROUTER_MAX_QUEUED = 64
-ROUTER_QUEUE_TIMEOUT_MS = 600000
+# Raised with the deadlines above: a wave of readers queued behind generations
+# that now run for as long as they need would otherwise be REFUSED while
+# waiting, which reports as a router error rather than as the long turn it is.
+ROUTER_QUEUE_TIMEOUT_MS = 7200000
 ROUTER_AFFINITY_HEADER = "X-Conductor-Group"
 ROUTER_SCHEMA_HEADER = "X-Conductor-Schema"
 ROUTER_LOG_LEVEL = "info"
@@ -482,6 +528,57 @@ def find_router_binary(root: Path, env: Optional[Dict[str, str]] = None) -> Opti
 
     found = shutil.which(ROUTER_BINARY_NAME, path=values.get("PATH", ""))
     return Path(found) if found else None
+
+
+def router_sources_newer_than(binary: Path, root: Path) -> List[Path]:
+    """Every llama-router source modified after `binary` was linked, sorted by path.
+
+    An empty list is the only reading that licenses a measured run. A campaign
+    scores itself on the ledger THIS BINARY writes, so a router linked before a
+    change to router/metrics.hpp emits lines the working tree no longer
+    describes — and the C++ suite cannot catch it, because `ctest` builds
+    `router-tests` and building that target does not relink `llama-router`.
+
+    A binary that does not exist is not stale: absent and out-of-date are
+    different findings with different remedies, and find_router_binary already
+    owns the first one.
+    """
+    binary_path = Path(binary)
+    if not binary_path.is_file():
+        return []
+    built = binary_path.stat().st_mtime
+
+    source_root = Path(root) / ROUTER_SOURCE_RELDIR
+    test_root = Path(root) / ROUTER_TEST_RELDIR
+    newer: List[Path] = []
+    for path in source_root.rglob("*"):
+        if path.suffix not in ROUTER_SOURCE_SUFFIXES or not path.is_file():
+            continue
+        if test_root == path.parent or test_root in path.parents:
+            continue
+        if path.stat().st_mtime > built:
+            newer.append(path)
+    return sorted(newer)
+
+
+def router_staleness_refusal(binary: Path, root: Path) -> Optional[str]:
+    """The operator-facing refusal for a stale router, or None when it is fresh.
+
+    Named separately from the predicate so a caller that only wants the verdict
+    never has to parse prose, and so the remedy is spelled in exactly one place.
+    """
+    newer = router_sources_newer_than(binary, root)
+    if not newer:
+        return None
+    listed = "\n  ".join(str(path) for path in newer)
+    return (
+        "%s at %s was built before %d of its own source file(s):\n  %s\n"
+        "The ledger a run is scored on is written by the binary, not by the tree, "
+        "so a run started here measures the older router and says nothing about "
+        "the change. Rebuild it with:\n"
+        "  cmake --build .out/build/clang-relwdebinfo --target %s"
+        % (ROUTER_BINARY_NAME, binary, len(newer), listed, ROUTER_BINARY_NAME)
+    )
 
 
 def router_preflight(

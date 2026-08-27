@@ -42,6 +42,7 @@ import io
 import json
 import os
 import re
+import shutil
 import signal
 import socket
 import socketserver
@@ -241,7 +242,14 @@ class RouterConfigGeneration(WiringTestCase):
         self.assertEqual(config["upstream"], {"host": UPSTREAM_HOST, "port": UPSTREAM_PORT})
         self.assertEqual(
             config["admission"],
-            {"maxInflightPerModel": slots, "maxQueued": 64, "queueTimeoutMs": 600000},
+            # Reads the constant rather than duplicating it: this row asserts the
+            # config's SHAPE, and the value's meaningful property — every role
+            # deadline outlasting it — is pinned by RoleTimeoutInvariantTests.
+            {
+                "maxInflightPerModel": slots,
+                "maxQueued": 64,
+                "queueTimeoutMs": cw.ROUTER_QUEUE_TIMEOUT_MS,
+            },
         )
         self.assertEqual(config["priorities"], {"interactive": 0, "review": 1, "batch": 2})
         self.assertEqual(
@@ -267,7 +275,11 @@ class RouterConfigGeneration(WiringTestCase):
         # A queue timeout must be able to report as itself rather than racing the
         # §2.1 sub-session watchdog.
         self.assertLess(config["admission"]["queueTimeoutMs"], cw.SUB_SESSION_TIMEOUT_MS)
-        self.assertEqual(cw.SUB_SESSION_TIMEOUT_MS, 900000)
+        # The literal is pinned so a silent drift is caught, and it is currently
+        # the MEASUREMENT setting: sub-session deadlines are effectively off while
+        # the campaign observes how long a roll actually takes. conductor_wiring.py
+        # carries the reasoning; changing that number should fail this row.
+        self.assertEqual(cw.SUB_SESSION_TIMEOUT_MS, 21600000)
 
         # Pure: generating a config writes nothing.
         self.assertEqual(sorted(p.name for p in self.configs.iterdir()), ["llama-models.ini"])
@@ -3018,3 +3030,67 @@ class RoleTimeoutInvariantTests(unittest.TestCase):
 
     def test_the_map_is_not_empty_so_the_invariant_is_not_vacuous(self):
         self.assertGreater(len(cw.ROLE_TIMEOUT_MS), 0)
+
+
+class RouterBinaryFreshness(unittest.TestCase):
+    """The campaign scores itself on a ledger the BINARY writes, not the tree.
+
+    `ctest` builds `router-tests`; the campaign runs `llama-router`. Those are
+    two targets, and building the first does not relink the second, so a change
+    to `router/metrics.hpp` can be green in the suite and absent from every
+    ledger line a run produces. These cases pin the check that notices.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="router-freshness-"))
+        self.addCleanup(shutil.rmtree, str(self.tmp), True)
+        (self.tmp / "router").mkdir(parents=True)
+        (self.tmp / "router" / "tests").mkdir(parents=True)
+        self.binary = self.tmp / "llama-router"
+
+    def _write(self, relpath: str, mtime: float) -> Path:
+        path = self.tmp / relpath
+        path.write_text("// source\n")
+        os.utime(str(path), (mtime, mtime))
+        return path
+
+    def _plant_binary(self, mtime: float) -> None:
+        self.binary.write_bytes(b"\x7fELF")
+        os.utime(str(self.binary), (mtime, mtime))
+
+    def test_a_binary_newer_than_every_source_is_fresh(self) -> None:
+        self._write("router/metrics.hpp", 1000.0)
+        self._write("router/main.cpp", 1000.0)
+        self._plant_binary(2000.0)
+        self.assertEqual(cw.router_sources_newer_than(self.binary, self.tmp), [])
+
+    def test_a_source_modified_after_the_build_is_reported(self) -> None:
+        self._write("router/main.cpp", 1000.0)
+        stale = self._write("router/metrics.hpp", 3000.0)
+        self._plant_binary(2000.0)
+        self.assertEqual(cw.router_sources_newer_than(self.binary, self.tmp), [stale])
+
+    def test_the_test_tree_is_not_a_source_of_the_router_binary(self) -> None:
+        """`router/tests/*.cpp` link into router-tests, never into llama-router."""
+        self._write("router/main.cpp", 1000.0)
+        self._write("router/tests/metrics_test.cpp", 3000.0)
+        self._plant_binary(2000.0)
+        self.assertEqual(cw.router_sources_newer_than(self.binary, self.tmp), [])
+
+    def test_a_missing_binary_is_not_reported_as_stale(self) -> None:
+        """Absent and out-of-date are different findings with different remedies."""
+        self._write("router/metrics.hpp", 3000.0)
+        self.assertEqual(cw.router_sources_newer_than(self.tmp / "nope", self.tmp), [])
+
+    def test_the_refusal_names_the_files_and_the_build_command(self) -> None:
+        stale = self._write("router/metrics.hpp", 3000.0)
+        self._plant_binary(2000.0)
+        message = cw.router_staleness_refusal(self.binary, self.tmp)
+        self.assertIsNotNone(message)
+        self.assertIn("metrics.hpp", message)
+        self.assertIn("--target llama-router", message)
+
+    def test_a_fresh_binary_yields_no_refusal(self) -> None:
+        self._write("router/metrics.hpp", 1000.0)
+        self._plant_binary(2000.0)
+        self.assertIsNone(cw.router_staleness_refusal(self.binary, self.tmp))

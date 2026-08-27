@@ -2071,7 +2071,7 @@ test("[12.2-config-written-atomic-valid] the written file validates against SCHE
     assert.equal(written.parallel.writes, "off");
     assert.equal(written.parallel.maxImplementers, 2);
     assert.equal(written.parallel.maxReaders, 6);
-    assert.equal(written.parallel.subSessionTimeoutMs, 900000);
+    assert.equal(written.parallel.subSessionTimeoutMs, 21600000);
     assert.equal(written.ponytail, "full");
     assert.equal(written.retention.keepRuns, 20);
     assert.equal(written.retention.maxRunDirBytes, 268435456);

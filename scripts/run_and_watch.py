@@ -77,7 +77,7 @@ import conductor_wiring as cw  # noqa: E402
 #   bench/corpus-repair.json      5 tasks, debugging and repair
 #   bench/corpus-perf.json        3 tasks, performance work
 #   bench/corpus-games.json       2 tasks, TUI games
-MANIFEST = "bench/conductor-tasks.json"
+MANIFEST = "bench/corpus-games.json"
 
 # Which tasks to run, by id. EMPTY LIST MEANS EVERY TASK IN THE MANIFEST, which
 # is the default and is what "run through all the prompts" means. Naming even
@@ -86,7 +86,7 @@ MANIFEST = "bench/conductor-tasks.json"
 #
 #   TASKS = []                    every task
 #   TASKS = ["euler-001-py"]      one task (also set MANIFEST to its set)
-TASKS: List[str] = ["slugify-ts", "euler-cli-py", "logfmt-lenses-ts", "clock-inject-py"]
+TASKS: List[str] = ["grid2048-headless-py"]
 
 # Which tiers to run. Empty means every tier present in the manifest. Tiers are
 # a wall-clock budget per cell, not a difficulty rating: T0 1800s, T1 2700s,
@@ -108,7 +108,7 @@ REPS = 1
 # an arm no change in this campaign can reach — so a cross-epoch difference in
 # another arm cannot be told from sampling without one. Baseline is the cheapest
 # arm, so three samples per task cost minutes and cannot alter what they measure.
-CALIBRATION_REPS: int = 2
+CALIBRATION_REPS: int = 0
 
 # The model. None means the manifest's own `defaults.model`, which for every set
 # in this repository is llamacpp/qwen3.8-27b. Set a string to run a different
@@ -153,7 +153,7 @@ ARMS = ("baseline", "doctrine", "conductor")
 #
 #   RESULTS_DIR = None                              fresh, timestamped
 #   RESULTS_DIR = ".data/benchmark/my-campaign"     fixed; resumes
-RESULTS_DIR: Optional[str] = None
+RESULTS_DIR: Optional[str] = ".data/benchmark/watch/step5-grid2048-nodeadline"
 
 # Where each cell's throwaway git repo is built. None means the driver's
 # default, $TMPDIR/llama-leash-conductor-work. The layout underneath is
@@ -292,7 +292,7 @@ DRY_RUN = False
 # The default is set high enough that the shipped config — every task in the
 # ladder, one repetition — runs without argument. It is here to catch the
 # genuine mistake, like leaving REPS at 3 on a full sweep. Set 0 to disable.
-MAX_ESTIMATED_HOURS = 72.0
+MAX_ESTIMATED_HOURS = 0
 
 # ═════════════════════════════════════════════════════════════════════════════
 # Below here is the implementation. You should not need to edit it.
@@ -589,6 +589,22 @@ def preflight() -> Dict[str, Any]:
     when this process started the services, which is the only case in which it
     is entitled to stop them.
     """
+    # The binary, not the tree, writes the ledger every cell is scored on, and
+    # nothing in this path rebuilds it. A router linked before a change to
+    # router/*.hpp serves a version the working tree no longer describes, and the
+    # C++ suite cannot notice: `ctest` builds `router-tests`, and building that
+    # target does not relink `llama-router`. Refusing costs one rebuild; not
+    # refusing costs a campaign measured on an instrument nobody checked.
+    binary = cw.find_router_binary(pathlib.Path(REPO_ROOT))
+    if binary is not None:
+        stale = cw.router_staleness_refusal(binary, pathlib.Path(REPO_ROOT))
+        if stale is not None:
+            print("  router binary STALE")
+            for line in stale.splitlines():
+                print("                %s" % line)
+            return {"ok": False, "handles": None}
+        print("  router binary fresh (newer than every router/ source)")
+
     served = served_model_name()
     try:
         ends = router_endpoints()
@@ -746,6 +762,42 @@ def relay(stream) -> None:
     stream.close()
 
 
+# Where the per-epoch review is written. One directory per epoch plus an INDEX
+# carrying the cross-epoch trend table, rather than one document holding every
+# epoch: the single-file shape reached 614 KB over fourteen epochs, which is the
+# reason nothing ever ran it automatically. Per epoch it is diffable, and a run
+# rewrites its own section without touching anyone else's.
+EPOCH_REVIEW_DIR = os.path.join(REPO_ROOT, "docs", "build", "epochs")
+
+
+def emit_epoch_review(results: str) -> str:
+    """Render the per-epoch review for every epoch on disk, including this one.
+
+    A run's own trees are still in the work root at this point and its results
+    are written, so the epoch this run just produced renders in full. It is
+    generated HERE rather than by hand because a deliverable nobody has to
+    remember is the only kind that stays current.
+
+    A failure to render is reported and swallowed: the benchmark's results are
+    already on disk, and a document that could not be built must not change the
+    exit code of the run that produced the data.
+
+    `results` is the directory THIS run wrote, passed in rather than recomputed:
+    with RESULTS_DIR unset, results_dir() mints a fresh timestamp on every call,
+    so a second call names a directory the run never used.
+    """
+    out = os.path.join(REPO_ROOT, "scripts", "epoch_review.py")
+    argv = [PYTHON, out, os.path.dirname(os.path.normpath(results)),
+            "--work-root", work_root(), "--out-dir", EPOCH_REVIEW_DIR]
+    try:
+        done = subprocess.run(argv, cwd=REPO_ROOT, capture_output=True, text=True, timeout=1800)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return "NOT WRITTEN (%s)" % exc
+    if done.returncode != 0:
+        return "NOT WRITTEN (exit %s: %s)" % (done.returncode, (done.stderr or "").strip()[:160])
+    return os.path.join(EPOCH_REVIEW_DIR, "INDEX.md")
+
+
 def main() -> int:
     if not os.path.isfile(BENCH):
         sys.stderr.write("run_and_watch: cannot find %s\n" % BENCH)
@@ -836,6 +888,7 @@ def main() -> int:
     print("  results       %s" % results)
     print("  report        %s" % os.path.join(REPO_ROOT, ".data", "benchmark", "conductor-report.md"))
     print("  work trees    %s  (kept, for reading afterwards)" % work_root())
+    print("  review        %s" % emit_epoch_review(results))
     return proc.returncode or 0
 
 
