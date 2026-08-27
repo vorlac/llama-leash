@@ -277,6 +277,70 @@ function escapeRawControlsInStrings(text: string): string {
   return out.join("");
 }
 
+// A reply whose delimiters are never closed is a document one or more characters
+// from correct, and three model round-trips is the wrong price for those
+// characters. Measured twice on the benchmarked local model: epoch 3's classifier
+// reply was 1,565 characters ending `..."ladderRung":"one-liner"}}`, and the
+// euler-001 crawl cell's was 1,346 ending `..."ladderRung":"minimal-code"}}`.
+// Both were right in every field and short exactly one `}`. The second cost three
+// attempts, a refusal and a re-wave — and the re-roll came back with a DIFFERENT
+// classification, so the price of the missing character was not only thirteen
+// minutes but the branch the run took.
+//
+// The repair is narrow ON PURPOSE. It appends closing delimiters and never
+// content, and it refuses two shapes it could technically close:
+//
+//   - a document that ends INSIDE a string, and
+//   - a document whose last meaningful character is `,` or `:`.
+//
+// Both are a value cut mid-word rather than a document cut after one. Closing
+// them would manufacture a well-formed object out of a partial answer and hand it
+// on as the model's reply, which is worse than the retry it saves. What survives
+// is the case where every value present is complete and only the closers are
+// absent.
+//
+// It cannot smuggle a wrong answer past the schema either: a repaired document
+// still has to JSON.parse AND validate, so a balanced document of the wrong shape
+// is refused exactly as an unbalanced one was.
+function closeUnterminated(text: string): string | null {
+  const open: string[] = [];
+  let inString = false;
+  let escaped = false;
+  let lastMeaningful = "";
+  for (const ch of text) {
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (inString) {
+      if (ch === "\\") escaped = true;
+      else if (ch === '"') {
+        inString = false;
+        lastMeaningful = ch;
+      }
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+      lastMeaningful = ch;
+    } else if (ch === "{" || ch === "[") {
+      open.push(ch);
+      lastMeaningful = ch;
+    } else if (ch === "}" || ch === "]") {
+      open.pop();
+      lastMeaningful = ch;
+    } else if (ch > " ") {
+      lastMeaningful = ch;
+    }
+  }
+  if (inString) return null;
+  if (open.length === 0) return null;
+  if (lastMeaningful === "," || lastMeaningful === ":") return null;
+  let closers = "";
+  for (let i = open.length - 1; i >= 0; i -= 1) closers += open[i] === "{" ? "}" : "]";
+  return text + closers;
+}
+
 // One JSON document from a reply: as sent, and failing that with its in-string
 // control characters escaped. The first pass is the whole story for a well-formed
 // reply; the second exists because the second pass's failure is the one worth
@@ -286,9 +350,26 @@ function readJsonDocument(text: string): unknown {
   try {
     return JSON.parse(text);
   } catch (err) {
-    const repaired = escapeRawControlsInStrings(text);
-    if (repaired === text) throw err;
-    return JSON.parse(repaired);
+    // Each repair is tried against the previous one's output, so a reply that is
+    // both prose-broken and unclosed is read. The error thrown is the LAST
+    // candidate's, which is the error the text has after every repair that could
+    // have helped it — a caller told "Unexpected end of input" for a document
+    // whose real fault was a raw newline has been told the wrong thing.
+    const escaped = escapeRawControlsInStrings(text);
+    const candidates: string[] = [];
+    if (escaped !== text) candidates.push(escaped);
+    const closed = closeUnterminated(escaped);
+    if (closed !== null) candidates.push(closed);
+
+    let lastError: unknown = err;
+    for (const candidate of candidates) {
+      try {
+        return JSON.parse(candidate);
+      } catch (candidateError) {
+        lastError = candidateError;
+      }
+    }
+    throw lastError;
   }
 }
 

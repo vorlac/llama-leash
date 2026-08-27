@@ -48,13 +48,20 @@ import {
   runStageTools,
 } from "../core/mechanics.ts";
 import { legalTools } from "../core/gates-phase.ts";
-import { ITEM_MAX_FILES, PLAN_PLACEHOLDER_LABELS, scanPlaceholders } from "../core/planning.ts";
+import {
+  ITEM_MAX_FILES,
+  PLAN_PLACEHOLDER_LABELS,
+  acceptanceClusters,
+  scanPlaceholders,
+} from "../core/planning.ts";
 import type { GateItem, GateRun } from "../core/gates-phase.ts";
 import { TOOL_BINDINGS } from "../core/tool-bindings.ts";
 import { VOCABULARIES } from "../core/vocab-registry.ts";
 import { ITEM_STATES } from "../core/fsm-item.ts";
 import { decideGit } from "../core/gates-git.ts";
 import {
+  ACCEPTANCE_SUBJECT_EXAMPLE,
+  classifierPrompt,
   decomposePrompt,
   scopableFiles,
   scopableSource,
@@ -994,4 +1001,113 @@ test("[D36] the brief carries file contents where they fit, and falls back to pa
   }
 
   rmSync(root, { recursive: true, force: true });
+});
+
+// ---------------------------------------------------------------------------
+// D45: the role judged by the one-cluster budget is shown the rule, and the
+// example it is shown actually satisfies the gate.
+//
+// ROLE_PACKS gives the planner decompose.md, whose "Measured limits" section
+// carries the subject-first form. It gives the `mechanical` role — the
+// classifier — core.md alone, which mentions neither clusters nor criterion
+// subjects. On the TRIVIAL route the classifier, not the planner, authors
+// trivialItem.acceptance, so the one role that rule governs was the one role
+// never shown it. Measured on euler-001-py: `escalate-to-work`, three clusters
+// (src/solvers/p001.py, register, get), which moves a run from the 16-call route
+// to the ~47-call route against a 24-call budget.
+//
+// The third case is the one that earns its keep. A prompt may state a rule and
+// still hand the model an example that the gate would refuse, and nothing about
+// the prose would show it. Running the shipped acceptanceClusters over the
+// example's own rows pins the advice as ACHIEVABLE, and the foil pins the case
+// it must still refuse — without that half the row passes over an example that
+// teaches nothing.
+// ---------------------------------------------------------------------------
+
+test("D45: classifierPrompt states the one-cluster budget and the subject-first form", () => {
+  const prompt = classifierPrompt("add a solver");
+  assert.match(prompt, /one acceptance cluster/i, "the classifier is told the budget it is judged by");
+  assert.ok(
+    prompt.includes(ACCEPTANCE_SUBJECT_EXAMPLE.good[0]),
+    "and is shown a criterion that satisfies it",
+  );
+});
+
+test("D45: decomposePrompt names rephrasing, not only splitting", () => {
+  // "split anything bigger" is the wrong remedy for a phrasing fault: an item
+  // over budget because two criteria open with bare symbols is not two items.
+  const prompt = decomposePrompt("do the work", testConfig(), packMap());
+  assert.match(prompt, /one acceptance cluster/i);
+  assert.ok(
+    prompt.includes(ACCEPTANCE_SUBJECT_EXAMPLE.good[0]),
+    "the planner's dispatch shows the shape that passes, not only the cap that fails",
+  );
+});
+
+test("D45: the example both prompts show resolves to ONE cluster, and its foil does not", () => {
+  // The example is `as const`, so its arrays are readonly; ClusterContext is the
+  // queue item's own mutable shape. Copying is the seam, not a cast.
+  const ctx = {
+    fileScope: [...ACCEPTANCE_SUBJECT_EXAMPLE.fileScope],
+    testScope: [...ACCEPTANCE_SUBJECT_EXAMPLE.testScope],
+  };
+  const good = acceptanceClusters(ACCEPTANCE_SUBJECT_EXAMPLE.good, ctx);
+  assert.deepEqual(
+    good,
+    ["src/parser.ts"],
+    "the advice the prompts give is advice the gate accepts: " + JSON.stringify(good),
+  );
+  const bad = acceptanceClusters(ACCEPTANCE_SUBJECT_EXAMPLE.bad, ctx);
+  assert.ok(
+    bad.length > 1,
+    "and the foil is genuinely refused, so the example teaches a real difference: " +
+      JSON.stringify(bad),
+  );
+});
+
+// ---------------------------------------------------------------------------
+// D45b: the clause the classifier looped on.
+//
+// The aborted classifier sub-session on the D45 verification cell spent 34,338
+// bytes of reasoning and was killed mid-thought. Its last words are not item
+// authoring — they are the §3.2 rule being simulated in its head:
+//
+//   "criterion 5 opens with src/solvers/p001.py, so it's the p001.py subject.
+//    Good. But it references __init__.py. Is that OK? ... Actually, wait. Let me
+//    reconsider. Is there a risk the gate sees src/solvers/__init__.py in
+//    criterion 5 and counts it as a subject?"
+//
+// The answer is no, and the guidance did not say so. A rule stated without the
+// clause that resolves its obvious ambiguity buys deliberation, not compliance,
+// and deliberation against a 12-minute role deadline is what killed the turn.
+//
+// The clause is pinned by running the gate rather than by asserting the prose:
+// telling a model something the gate does not do is worse than telling it
+// nothing, and this row is what stops that.
+// ---------------------------------------------------------------------------
+
+test("D45b: a criterion's SUBJECT is its first path — later paths cost nothing", () => {
+  const ctx = {
+    fileScope: [...ACCEPTANCE_SUBJECT_EXAMPLE.fileScope],
+    testScope: [...ACCEPTANCE_SUBJECT_EXAMPLE.testScope],
+  };
+  const clusters = acceptanceClusters([...ACCEPTANCE_SUBJECT_EXAMPLE.laterPath], ctx);
+  assert.deepEqual(
+    clusters,
+    ["src/parser.ts"],
+    "a criterion opening with a declared path and naming another path later is ONE " +
+      "cluster; the classifier that could not confirm this spent 34 KB failing to: " +
+      JSON.stringify(clusters),
+  );
+});
+
+test("D45b: both prompts state the first-path clause", () => {
+  for (const prompt of [classifierPrompt("add a solver"),
+                        decomposePrompt("do the work", testConfig(), packMap())]) {
+    assert.match(
+      prompt,
+      /only the first path/i,
+      "the clause that resolves the rule's ambiguity must reach the role the rule judges",
+    );
+  }
 });

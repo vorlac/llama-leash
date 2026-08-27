@@ -1368,3 +1368,128 @@ test("[7.1-watchdog] an absent roleTimeoutMs block leaves every role on the glob
   await pending;
   assert.equal(sdk.aborts.length, 1, "no block means no change in behaviour");
 });
+
+// ===========================================================================
+// D10 — a reply short of its closing delimiters
+//
+// Measured twice on the benchmarked local model, both in the classifier seat.
+// Epoch 3: a 1,565-character reply ending `..."ladderRung":"one-liner"}}`.
+// The euler-001 crawl cell, 2026-08-26: 1,346 characters ending
+// `..."ladderRung":"minimal-code"}}`, checked programmatically to end OUTSIDE a
+// string with an unclosed-delimiter stack of exactly ['{'].
+//
+// Both were right in every field and short exactly one `}`. The second cost
+// three attempts, a refusal and a re-wave — 7.3 minutes of a 45-minute cell —
+// and the re-roll came back with a DIFFERENT classification, so the price of the
+// absent character was the branch the run took, not only the minutes.
+//
+// The cases below are in two halves on purpose. The first half is the repair.
+// The second half is what it must REFUSE, which is the half that keeps it from
+// manufacturing a well-formed object out of a partial answer.
+// ===========================================================================
+
+test("[D10] a reply short of its closing brace is read, not refused", async () => {
+  const registry = makeRegistry();
+  const sdk = makeFakeSdk({ registry });
+  const { journal, records } = makeRecordingJournal();
+  const fanout: Fanout = createFanout(sdk.client, makeConfig(), journal, registry, makeFakeTreeState());
+
+  const raw = '{"ok": true, "note": "done"';
+  assert.throws(() => JSON.parse(raw), "premise: this is not valid JSON as sent");
+
+  sdk.setResponder(() => ({ kind: "reply", text: raw }));
+  const result = await fanout.dispatch(readJob());
+
+  assert.equal(sdk.prompts.length, 1, "the repair costs no attempt");
+  assert.deepEqual(result.value, VALID_VALUE, "every value present survives; only the closer was added");
+  assert.equal(
+    records.filter((r) => r.event === "subsession.retry").length,
+    0,
+    "and no retry is journaled",
+  );
+});
+
+test("[D10] mixed nesting left open is closed innermost first", async () => {
+  const registry = makeRegistry();
+  const sdk = makeFakeSdk({ registry });
+  const { journal, records } = makeRecordingJournal();
+  const fanout: Fanout = createFanout(sdk.client, makeConfig(), journal, registry, makeFakeTreeState());
+
+  // Three delimiters open at the end, two kinds, in an order only a stack gets
+  // right: `[` then `{` then `[`. The distinguishing assertion is WHICH error
+  // comes back. Closed innermost-first the document parses and then fails the
+  // probe schema on `extra`; closed in any other order it does not parse at all
+  // and the error says so. A test that only asked "did it fail" could not tell
+  // a correct stack from a reversed one.
+  sdk.setResponder(() => ({
+    kind: "reply",
+    text: '{"ok": true, "note": "done", "extra": [{"a": [1, 2',
+  }));
+  await fanout.dispatch(readJob());
+  const errors = records
+    .filter((r) => r.event === "subsession.complete")
+    .flatMap((r) => (r.data as { errors?: string[] }).errors ?? []);
+  assert.ok(
+    errors.length > 0 && !errors.some((e) => e.includes("not parseable JSON")),
+    "closed as ] } ] the document parses; the surviving complaint is the schema's: " +
+      JSON.stringify(errors),
+  );
+});
+
+test("[D10] a reply cut mid-string is NOT repaired", async () => {
+  const registry = makeRegistry();
+  const sdk = makeFakeSdk({ registry });
+  const { journal, records } = makeRecordingJournal();
+  const fanout: Fanout = createFanout(sdk.client, makeConfig(), journal, registry, makeFakeTreeState());
+
+  // A value cut mid-word, not a document cut after one. Closing the string would
+  // invent where the value ended and pass a partial answer on as the model's.
+  sdk.setResponder(() => ({ kind: "reply", text: '{"ok": true, "note": "hal' }));
+  await fanout.dispatch(readJob());
+  const errors = records
+    .filter((r) => r.event === "subsession.complete")
+    .flatMap((r) => (r.data as { errors?: string[] }).errors ?? []);
+  assert.ok(
+    errors.some((e) => e.includes("not parseable JSON")),
+    "a reply cut inside a string is still refused: " + JSON.stringify(errors),
+  );
+});
+
+test("[D10] a reply whose last token is a comma or a colon is NOT repaired", async () => {
+  const registry = makeRegistry();
+  const sdk = makeFakeSdk({ registry });
+  const { journal, records } = makeRecordingJournal();
+  const fanout: Fanout = createFanout(sdk.client, makeConfig(), journal, registry, makeFakeTreeState());
+
+  for (const text of ['{"ok": true, "note": ', '{"ok": true, "note": "done",']) {
+    sdk.setResponder(() => ({ kind: "reply", text }));
+    await fanout.dispatch(readJob());
+  }
+  const errors = records
+    .filter((r) => r.event === "subsession.complete")
+    .flatMap((r) => (r.data as { errors?: string[] }).errors ?? []);
+  assert.equal(
+    errors.filter((e) => e.includes("not parseable JSON")).length >= 2,
+    true,
+    "a structure with a member missing is refused, not closed: " + JSON.stringify(errors),
+  );
+});
+
+test("[D10] closing the delimiters cannot smuggle a wrong shape past the schema", async () => {
+  const registry = makeRegistry();
+  const sdk = makeFakeSdk({ registry });
+  const { journal, records } = makeRecordingJournal();
+  const fanout: Fanout = createFanout(sdk.client, makeConfig(), journal, registry, makeFakeTreeState());
+
+  // Balances to valid JSON and still lacks the required "note": the repair buys a
+  // parse, never an acceptance.
+  sdk.setResponder(() => ({ kind: "reply", text: '{"ok": true' }));
+  await fanout.dispatch(readJob());
+  const errors = records
+    .filter((r) => r.event === "subsession.complete")
+    .flatMap((r) => (r.data as { errors?: string[] }).errors ?? []);
+  assert.ok(
+    errors.length > 0 && !errors.some((e) => e.includes("not parseable JSON")),
+    "it parses, then fails the SCHEMA on its own content: " + JSON.stringify(errors),
+  );
+});

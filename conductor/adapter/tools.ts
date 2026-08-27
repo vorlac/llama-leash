@@ -899,12 +899,80 @@ export interface ClassifyResult {
   escalation: string[];
 }
 
-function classifierPrompt(userPrompt: string): string {
+/**
+ * One worked criterion set for the §3.2 acceptance-cluster budget, and one foil.
+ *
+ * Both prompts that produce an acceptance list quote `good`, and
+ * doctrine-mechanics.test.ts runs the shipped `acceptanceClusters` over both —
+ * so an example a later edit breaks fails a test rather than quietly teaching a
+ * shape the gate refuses. `bad` is here for the same reason a guard needs a case
+ * it must reject: an example that cannot be got wrong teaches nothing.
+ */
+export const ACCEPTANCE_SUBJECT_EXAMPLE = {
+  fileScope: ["src/parser.ts"],
+  testScope: ["tests/parser.test.ts"],
+  good: [
+    "src/parser.ts exports parse(input) and returns a Document",
+    "src/parser.ts rejects empty input with a ParseError",
+    "src/registry.ts is not modified",
+  ],
+  bad: [
+    "parse(input) returns a Document",
+    "rejects empty input with a ParseError",
+    "tests/parser.test.ts covers both cases",
+  ],
+  // The shape a classifier stalled on: a criterion whose subject is a declared
+  // path and which then names ANOTHER path. It is one cluster, and the row in
+  // doctrine-mechanics.test.ts proves it against the shipped gate rather than
+  // against this comment.
+  laterPath: [
+    "src/parser.ts is registered when the package loads (src/registry.ts imports it)",
+  ],
+} as const;
+
+// The §3.2 budget in the words of whichever role must satisfy it, with the shape
+// that passes rather than only the cap that fails.
+//
+// The remedy is the load-bearing half. A criterion list over budget because two
+// entries open with a bare symbol is a PHRASING fault, and "split anything
+// bigger" — the gloss decomposePrompt carried alone — prescribes a second item
+// for a problem a rewritten sentence solves. Measured on euler-001-py at both
+// stages: `(src/solvers/p001.py, register, get)` from the classifier and
+// `(p001.solve, src/solvers/p001.py, tests/check_p001.py)` from the planner,
+// each one file's worth of work refused as three subjects.
+const ACCEPTANCE_CLUSTER_GUIDANCE =
+  "ACCEPTANCE, and the rule it is judged by: the gate counts the distinct SUBJECTS your " +
+  "criteria name, and more than one acceptance cluster is a REJECTION, not a warning. " +
+  "Open every criterion with a path this item declares in fileScope. A bare symbol " +
+  "(`solve()`, `register(...)`) or a test path at the front of a criterion is its own " +
+  "subject and costs a cluster. A criterion about a file this item must NOT change is a " +
+  "preservation guard and costs nothing — phrase it `<path> is not modified`.\n" +
+  // The ambiguity a stalled classifier spent 34 KB of reasoning failing to
+  // resolve, answered outright. Only the FIRST path is read as the subject, so a
+  // criterion may reference any other path freely — and a rule that leaves this
+  // open buys deliberation against a role deadline rather than compliance.
+  "ONLY THE FIRST PATH IN A CRITERION IS ITS SUBJECT. Naming other paths later in the " +
+  "same criterion costs nothing, so say what you mean and do not split a criterion to " +
+  "avoid mentioning a second file.\n" +
+  "Passes (one cluster):\n" +
+  ACCEPTANCE_SUBJECT_EXAMPLE.good.map((row) => "  - " + row).join("\n") +
+  "\nRefused (three):\n" +
+  ACCEPTANCE_SUBJECT_EXAMPLE.bad.map((row) => "  - " + row).join("\n") +
+  "\nIf an item is over budget for its PHRASING, rewrite the criteria; split it only when " +
+  "it genuinely covers two subjects.\n\n";
+
+export function classifierPrompt(userPrompt: string): string {
   return (
     "Classify the following work request as exactly one of: question, trivial, work. " +
     'Reply with a single JSON object matching the Classification schema (kind, rationale, ' +
     'confidence, trivialItem). trivialItem is a complete queue item (minus id/dependsOn) and ' +
-    'is non-null ONLY for kind "trivial".\n\nREQUEST:\n' +
+    'is non-null ONLY for kind "trivial".\n\n' +
+    // The mechanical role's pack is core.md, which carries neither this rule nor
+    // an example of obeying it — and a trivialItem whose acceptance misses the
+    // budget is not returned for repair, it is escalated to `work`, which is a
+    // three-fold larger process. The rule travels with the request instead.
+    ACCEPTANCE_CLUSTER_GUIDANCE +
+    "REQUEST:\n" +
     userPrompt
   );
 }
@@ -2144,7 +2212,8 @@ export function decomposePrompt(
     behavioralPaths +
     "\n- the per-item file cap: " +
     String(ITEM_MAX_FILES) +
-    " files and one acceptance cluster; split anything bigger.\n" +
+    " files and one acceptance cluster.\n" +
+    ACCEPTANCE_CLUSTER_GUIDANCE +
     ponytailLaw(config) +
     scopableFilesSection(scopable, source) +
     "\nREQUEST:\n" +
