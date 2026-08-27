@@ -153,7 +153,7 @@ ARMS = ("baseline", "doctrine", "conductor")
 #
 #   RESULTS_DIR = None                              fresh, timestamped
 #   RESULTS_DIR = ".data/benchmark/my-campaign"     fixed; resumes
-RESULTS_DIR: Optional[str] = ".data/benchmark/watch/step5-grid2048-nodeadline"
+RESULTS_DIR: Optional[str] = ".data/benchmark/watch/step6-grid2048-8h"
 
 # Where each cell's throwaway git repo is built. None means the driver's
 # default, $TMPDIR/llama-leash-conductor-work. The layout underneath is

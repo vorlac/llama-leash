@@ -77,7 +77,7 @@
       "behavioralPaths": [
         "src/**"
       ],
-      "runTimeoutSec": 3600
+      "runTimeoutSec": 28800
     },
     {
       "id": "snake-headless-py",
