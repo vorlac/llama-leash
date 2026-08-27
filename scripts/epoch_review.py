@@ -53,19 +53,78 @@ def commit_at(when: datetime) -> Optional[str]:
     return sha or None
 
 
+# Every manifest a run can be launched from, most authoritative first. A cell's
+# result JSON records its task id and not the manifest that defined it, so the
+# task is looked up across all of them; the order decides a collision, which
+# makes the reading stable rather than dependent on directory order.
+MANIFEST_PATHS = (
+    "bench/conductor-tasks.json",
+    "bench/corpus-euler.json",
+    "bench/corpus-games.json",
+    "bench/corpus-systems.json",
+    "bench/corpus-repair.json",
+    "bench/corpus-perf.json",
+)
+
+
+def tasks_from_manifests(docs: Dict[str, Optional[dict]]) -> Dict[str, dict]:
+    """Every task in every manifest, keyed by id, tagged with where it came from.
+
+    First writer wins, so `MANIFEST_PATHS` order is what resolves an id defined
+    twice. `_manifest` is added to each entry because a reader comparing two
+    epochs needs to know which file defined the prompt — two manifests can ask
+    for the same task id and mean different things.
+
+    An unreadable manifest costs only itself: one malformed file used to empty
+    the whole lookup, and every task in the epoch then reported as absent.
+    """
+    def precedence(path: str) -> Tuple[int, str]:
+        # Ordered by MANIFEST_PATHS, not by however the caller built the dict:
+        # a collision must resolve the same way whoever calls this and in
+        # whatever order they happened to read the files.
+        try:
+            return (MANIFEST_PATHS.index(path), path)
+        except ValueError:
+            return (len(MANIFEST_PATHS), path)
+
+    found: Dict[str, dict] = {}
+    for path in sorted(docs, key=precedence):
+        doc = docs[path]
+        if not isinstance(doc, dict) and not isinstance(doc, list):
+            continue
+        entries = doc["tasks"] if isinstance(doc, dict) else doc
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict) or "id" not in entry:
+                continue
+            if entry["id"] in found:
+                continue
+            found[entry["id"]] = {**entry, "_manifest": path}
+    return found
+
+
 def manifest_at(sha: Optional[str]) -> Dict[str, dict]:
-    """The task manifest as of a commit, keyed by task id; empty if unreadable."""
+    """Every manifest as of a commit, keyed by task id; empty if none are readable.
+
+    Reading ONE manifest was the defect: a run launched from any corpus set
+    reported "does not carry this task" for every task it ran, which names the
+    manifest as the culprit when the reader was looking in the wrong file. The
+    prompt is the field every other section is downstream of, so losing it loses
+    the epoch.
+    """
     if sha is None:
         return {}
-    raw = _git("show", f"{sha}:bench/conductor-tasks.json")
-    if not raw.strip():
-        return {}
-    try:
-        doc = json.loads(raw)
-    except json.JSONDecodeError:
-        return {}
-    entries = doc["tasks"] if isinstance(doc, dict) else doc
-    return {t["id"]: t for t in entries if isinstance(t, dict) and "id" in t}
+    docs: Dict[str, Optional[dict]] = {}
+    for path in MANIFEST_PATHS:
+        raw = _git("show", f"{sha}:{path}")
+        if not raw.strip():
+            continue
+        try:
+            docs[path] = json.loads(raw)
+        except json.JSONDecodeError:
+            docs[path] = None
+    return tasks_from_manifests(docs)
 
 
 @dataclass(frozen=True)
@@ -384,9 +443,148 @@ def load_results(results_dir: Path) -> Dict[Tuple[str, str], dict]:
     return found
 
 
+def load_all_results(results_dir: Path) -> Dict[Tuple[str, str], List[dict]]:
+    """Every cell, keeping repetitions rather than letting the last file win.
+
+    `load_results` above is deliberately last-wins: the per-epoch document renders
+    one tree and one transcript per arm, and three would be three of the same
+    thing. The trend table is the opposite case — repetitions ARE the measurement
+    there, because an arm's spread is what a reader compares an improvement
+    against.
+    """
+    found: Dict[Tuple[str, str], List[dict]] = {}
+    for f in sorted(results_dir.glob("*.json")):
+        try:
+            d = json.loads(f.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        if "arm" in d and "taskId" in d:
+            found.setdefault((d["arm"], d["taskId"]), []).append(d)
+    return found
+
+
+def trend_cell_many(records: Sequence[dict]) -> str:
+    """One epoch's outcomes for one (task, arm), repetitions and all.
+
+    A single repetition reads exactly as it always did. Several render as a
+    count, the verdicts that actually occurred, and the range — because the
+    spread is the thing a later epoch's single number has to be judged against,
+    and collapsing it to one repetition hides the noise floor inside the figure
+    a reader would compare.
+    """
+    if not records:
+        return "\u2013"
+    if len(records) == 1:
+        return trend_cell(records[0])
+    verdicts: List[str] = []
+    for record in records:
+        head = "TIMEOUT" if record.get("timedOut") else ("PASS" if record.get("passed") else "FAIL")
+        if head not in verdicts:
+            verdicts.append(head)
+    minutes = sorted((r.get("wallClockMs") or 0) / 60000.0 for r in records)
+    tokens = sorted(int((r.get("tokens") or {}).get("completion") or 0) for r in records)
+    return "%s x%d %.1f\u2013%.1fm %d\u2013%dt" % (
+        "/".join(verdicts), len(records), minutes[0], minutes[-1], tokens[0], tokens[-1])
+
+
 def epoch_start(results_dir: Path) -> datetime:
-    """The epoch's own clock, from its directory name (YYYYMMDD-HHMMSS, local)."""
-    return datetime.strptime(results_dir.name, "%Y%m%d-%H%M%S").astimezone()
+    """The epoch's own clock.
+
+    Three sources, in order of how directly each knows the answer. The directory
+    name is the convention `run_and_watch` mints and carries the start to the
+    second. A directory named for what the run was FOR — which every
+    investigation run uses — knows nothing, so the cells are asked instead: each
+    result carries `startedIso`, and the earliest is when the epoch began.
+
+    The last fallback is the directory's own mtime, and it exists so that one
+    unreadable epoch costs itself a precise clock rather than costing every other
+    epoch its section. Raising here discarded the whole document.
+    """
+    try:
+        return datetime.strptime(results_dir.name, "%Y%m%d-%H%M%S").astimezone()
+    except ValueError:
+        pass
+    started: List[datetime] = []
+    for path in sorted(results_dir.glob("*.json")):
+        try:
+            stamp = json.loads(path.read_text()).get("startedIso")
+        except (OSError, json.JSONDecodeError, AttributeError):
+            continue
+        if not isinstance(stamp, str) or not stamp:
+            continue
+        try:
+            # `startedIso` is spelled with a trailing Z, which /usr/bin/python3's
+            # 3.9 fromisoformat rejects outright.
+            started.append(datetime.fromisoformat(stamp.replace("Z", "+00:00")))
+        except ValueError:
+            continue
+    if started:
+        return min(started).astimezone()
+    try:
+        return datetime.fromtimestamp(results_dir.stat().st_mtime).astimezone()
+    except OSError:
+        return datetime.fromtimestamp(0).astimezone()
+
+
+@dataclass
+class Dispatch:
+    """One sub-agent as the run created it: its role, its prompt, what came back.
+
+    `ok` is None for a dispatch with no completion record — a sub-agent still
+    generating when the cell's ceiling fired. Unfinished and failed are different
+    facts about a run and a False here would merge them.
+    """
+
+    role: str
+    prompt: str
+    ok: Optional[bool] = None
+    attempts: Optional[int] = None
+    response: str = ""
+
+
+def subagent_dispatches(repo_dir: Path) -> List[Dispatch]:
+    """Every sub-agent the conductor arm dispatched, in order, with its prompt.
+
+    The session store cannot answer this. `read_turns` keeps `role ==
+    "assistant"` messages, and a sub-session's prompt is a user-role message, so
+    the transcript shows what each sub-agent DID and never what it was TOLD. The
+    journal records the prompt verbatim on `subsession.dispatched`, and joining
+    the two is the only way the document can show both.
+
+    An arm with no journal returns nothing rather than raising: baseline and
+    doctrine load no plugin, so writing no journal is what they are supposed to
+    do, and it is not an error to report.
+    """
+    runs = repo_dir / ".conductor" / "runs"
+    if not runs.is_dir():
+        return []
+    out: List[Dispatch] = []
+    for journal in sorted(runs.glob("*/journal.jsonl")):
+        try:
+            text = journal.read_text(errors="replace")
+        except OSError:
+            continue
+        pending: Optional[Dispatch] = None
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            data = record.get("data") or {}
+            if record.get("event") == "subsession.dispatched":
+                pending = Dispatch(role=str(data.get("role") or "(unnamed)"),
+                                   prompt=str(data.get("prompt") or ""))
+                out.append(pending)
+            elif record.get("event") == "subsession.complete" and pending is not None:
+                pending.ok = bool(data.get("ok"))
+                attempts = data.get("attempts")
+                pending.attempts = int(attempts) if isinstance(attempts, int) else None
+                pending.response = str(data.get("response") or "")
+                pending = None
+    return out
 
 
 def verdict(record: Optional[dict]) -> str:
@@ -401,14 +599,15 @@ def render_epoch(results_dir: Path, work_root: Path, index: int,
                  previous: Optional[datetime], transcripts: bool = True) -> str:
     started = epoch_start(results_dir)
     results = load_results(results_dir)
-    manifest = manifest_at(commit_at(started))
+    sha = commit_at(started)
+    manifest = manifest_at(sha)
     out: List[str] = []
     w = out.append
 
     w(f"\n---\n\n# Epoch {index} — `{results_dir.name}`\n")
     w(f"Started {started:%Y-%m-%d %H:%M %Z} · {len(results)} cells\n")
 
-    w("## 4 · Changes since the previous epoch\n")
+    w("## 1 · Changes since the previous epoch\n")
     changes = commits_between(previous, started)
     if not changes:
         w("_No commits landed between the previous epoch and this one._\n")
@@ -425,14 +624,25 @@ def render_epoch(results_dir: Path, work_root: Path, index: int,
         entry = manifest.get(tid, {})
         w(f"\n## Task `{tid}`" + (f"  ({entry.get('tier')})" if entry.get("tier") else "") + "\n")
 
-        w("### 1 · The prompt, as it was fed this epoch\n")
+        w("### 2 · The prompt, as it was fed this epoch\n")
         prompt = entry.get("prompt")
         if prompt:
+            source = entry.get("_manifest")
+            if source:
+                w("From `%s` as of `%s`.\n" % (source, (sha or "?")[:12]))
             w("```")
             w(prompt)
             w("```\n")
         else:
-            w("_The manifest at this epoch's commit does not carry this task._\n")
+            # Naming the search, not the manifest. "The manifest does not carry
+            # this task" asserts a fact about the corpus; the true statement is
+            # that this reader looked in a stated list and did not find it, which
+            # is the sentence that tells someone where to go next.
+            w("_Not recovered. Searched %s at commit `%s` and none defines task "
+              "`%s`. The prompt is the field every other section is downstream "
+              "of, so this epoch cannot be used to decide where to focus until "
+              "it is._\n" % (", ".join("`%s`" % m for m in MANIFEST_PATHS),
+                              (sha or "unknown")[:12], tid))
 
         for arm in ARMS:
             record = results.get((arm, tid))
@@ -446,7 +656,7 @@ def render_epoch(results_dir: Path, work_root: Path, index: int,
             w(f"**{verdict(record)}** · {mins:.1f} min · hidden tests: "
               f"{'pass' if gauge else 'fail'}\n")
 
-            w("#### 3 · Cost by phase\n")
+            w("#### 3a · Cost by phase\n")
             turns = read_turns(db) if db else []
             if not turns:
                 w("_No session store for this cell — per-phase cost is unrecoverable._\n")
@@ -486,7 +696,7 @@ def render_epoch(results_dir: Path, work_root: Path, index: int,
             # No early exit below this point: an arm that produced nothing is the
             # arm whose transcript a reader most needs, and a `continue` here
             # drops it for exactly those cells.
-            w("#### 2 · The resulting code\n")
+            w("#### 3b · The resulting code\n")
             if repo is None:
                 w("_Not preserved. `run_and_watch.py` clears the work root at the start of "
                   "every run, so this epoch's trees were destroyed when the next one "
@@ -503,7 +713,38 @@ def render_epoch(results_dir: Path, work_root: Path, index: int,
                     w(body.rstrip("\n") if body.strip() else "(empty)")
                     w("```\n")
 
-            w("#### 4 · The transcript\n")
+            # Between the code and the transcript, because it explains the
+            # transcript: every sub-agent turn below belongs to one of these
+            # dispatches, and the store cannot say what any of them was asked.
+            dispatches = subagent_dispatches(repo) if repo is not None else []
+            if dispatches:
+                w("#### 3c · Sub-agents dispatched\n")
+                w("What each sub-agent was ASKED, read from the run journal. The session "
+                  "store holds only assistant turns, so this is the half of a sub-session "
+                  "that the transcript below structurally cannot show.\n")
+                for number, dispatch in enumerate(dispatches, start=1):
+                    if dispatch.ok is None:
+                        verdict_text = "still generating when the cell ended"
+                    elif dispatch.ok:
+                        verdict_text = "answered on attempt %s" % (dispatch.attempts or 1)
+                    else:
+                        verdict_text = "produced no valid reply"
+                    w("**%d · `%s`** — %s\n" % (number, dispatch.role, verdict_text))
+                    w("_prompt_")
+                    w("```")
+                    w(clip(dispatch.prompt, TOOL_INPUT_CHARS))
+                    w("```")
+                    if dispatch.response:
+                        w("_reply_")
+                        w("```")
+                        w(clip(dispatch.response, TOOL_OUTPUT_CHARS))
+                        w("```")
+                    w("")
+            elif repo is not None and arm == "conductor":
+                w("#### 3c · Sub-agents dispatched\n")
+                w("_None: this cell wrote no journal, or ended before it dispatched one._\n")
+
+            w("#### 3d · The transcript\n")
             if not transcripts:
                 # Omitting the section silently would read as "this arm did
                 # nothing worth showing", which is a different claim entirely.
@@ -519,16 +760,144 @@ def render_epoch(results_dir: Path, work_root: Path, index: int,
     return "\n".join(out)
 
 
+@dataclass
+class TrendRow:
+    """One (task, arm) across every epoch that ran it."""
+
+    task: str
+    arm: str
+    cells: Dict[str, str] = field(default_factory=dict)
+
+
+def trend_cell(record: Optional[dict]) -> str:
+    """One epoch's outcome for one (task, arm), as a phrase rather than a number.
+
+    A cell that did not run, a cell that failed and a cell that ran out of clock
+    are three different facts, and the campaign has been bitten five times by a
+    metric that renders them alike. They get three different words here.
+    """
+    if record is None:
+        return "\u2013"
+    tokens = (record.get("tokens") or {}).get("completion")
+    minutes = (record.get("wallClockMs") or 0) / 60000.0
+    if record.get("timedOut"):
+        head = "TIMEOUT"
+    elif record.get("passed"):
+        head = "PASS"
+    else:
+        head = "FAIL"
+    return "%s %.1fm %st" % (head, minutes, tokens if tokens is not None else "?")
+
+
+def trend_rows(epochs: Sequence[Tuple[str, Dict[Tuple[str, str], dict]]]) -> List[TrendRow]:
+    """The cross-epoch table: one row per (task, arm), one column per epoch.
+
+    This is the only view that answers what CHANGED. A per-epoch document can say
+    a cell timed out; only the row across epochs says it has timed out four times
+    and got slower each time.
+    """
+    rows: Dict[Tuple[str, str], TrendRow] = {}
+    order: List[Tuple[str, str]] = []
+    for label, results in epochs:
+        for (arm, task), record in results.items():
+            key = (task, arm)
+            if key not in rows:
+                rows[key] = TrendRow(task=task, arm=arm)
+                order.append(key)
+            # One record or a list of them: the trend table is the only caller
+            # that keeps repetitions, and both spellings reach it.
+            batch = record if isinstance(record, list) else [record]
+            rows[key].cells[label] = trend_cell_many(batch)
+    return [rows[key] for key in sorted(order)]
+
+
+def render_index(watch_root: Path, epochs: Sequence[Path],
+                 written: Sequence[Path]) -> str:
+    """The front page: every epoch, and every task's history across all of them."""
+    out: List[str] = []
+    w = out.append
+    w("# Epoch index — the same prompts, vanilla against llama-leash\n")
+    w("One directory per epoch, newest last. Each holds `REVIEW.md`: the prompt as it")
+    w("was fed that epoch, the changes committed since the previous one, and then per")
+    w("arm the produced code, the cost by phase, every sub-agent's dispatch prompt, and")
+    w("the full transcript.\n")
+    for arm in ARMS:
+        w(f"- **`{arm}`** \u2014 {ARM_BLURB[arm]}")
+    w("")
+    w("## Epochs\n")
+    w("| # | epoch | started | cells | review |")
+    w("|---:|---|---|---:|---|")
+    labels: List[str] = []
+    collected: List[Tuple[str, Dict[Tuple[str, str], dict]]] = []
+    for index, (results_dir, review) in enumerate(zip(epochs, written), start=1):
+        results = load_all_results(results_dir)
+        started = epoch_start(results_dir)
+        label = results_dir.name
+        labels.append(label)
+        collected.append((label, results))
+        cells = sum(len(batch) for batch in results.values())
+        w("| %d | `%s` | %s | %d | [REVIEW](%s/REVIEW.md) |"
+          % (index, label, started.strftime("%Y-%m-%d %H:%M"), cells, review.parent.name))
+    w("")
+    w("## What changed across epochs\n")
+    w("One row per task and arm. `\u2013` is an epoch that did not run that cell, which")
+    w("is not the same fact as a failure and does not share its word.\n")
+    w("| task | arm | " + " | ".join("`%s`" % l for l in labels) + " |")
+    w("|---|---|" + "---|" * len(labels))
+    for row in trend_rows(collected):
+        w("| `%s` | `%s` | %s |"
+          % (row.task, row.arm, " | ".join(row.cells.get(l, "\u2013") for l in labels)))
+    w("")
+    return "\n".join(out)
+
+
+def write_epoch_tree(watch_root: Path, work_root: Path, out_dir: Path,
+                     transcripts: bool = True, since: str = "") -> List[Path]:
+    """One directory per epoch plus an index, and the list of files written.
+
+    Splitting is what makes the document usable rather than merely present: a
+    single file over fourteen epochs reached 614 KB, which is why nothing ever
+    ran it automatically. Per epoch it is diffable, and a run can emit its own
+    section without rewriting anyone else's.
+    """
+    epochs = sorted(d for d in watch_root.iterdir()
+                    if d.is_dir() and any(d.glob("*.json")))
+    if since:
+        epochs = [d for d in epochs if d.name >= since]
+    out_dir.mkdir(parents=True, exist_ok=True)
+    written: List[Path] = []
+    previous: Optional[datetime] = None
+    for index, results_dir in enumerate(epochs, start=1):
+        section = out_dir / ("%02d-%s" % (index, results_dir.name))
+        section.mkdir(parents=True, exist_ok=True)
+        body = render_epoch(results_dir, work_root, index, previous, transcripts=transcripts)
+        review = section / "REVIEW.md"
+        review.write_text(body.lstrip("\n-").lstrip() + "\n")
+        written.append(review)
+        previous = epoch_start(results_dir)
+    (out_dir / "INDEX.md").write_text(render_index(watch_root, epochs, written) + "\n")
+    return written
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     ap.add_argument("watch_root", type=Path)
     ap.add_argument("--work-root", type=Path, default=Path.home() / ".llama-leash-work")
-    ap.add_argument("--out", type=Path, required=True)
+    ap.add_argument("--out", type=Path, default=None,
+                    help="write ONE document holding every epoch")
+    ap.add_argument("--out-dir", type=Path, default=None,
+                    help="write one directory per epoch plus INDEX.md; the shape a "
+                         "run emits, because a single document over fourteen epochs "
+                         "reached 614 KB and nothing ever ran it automatically")
     ap.add_argument("--since", default="", help="only epochs at or after this directory name")
     ap.add_argument("--no-transcripts", action="store_true", dest="no_transcripts",
                     help="omit per-turn reasoning, tool calls and tool output; the "
                          "document says so where they would have been")
     args = ap.parse_args()
+
+    if args.out is None and args.out_dir is None:
+        print("epoch_review: pass --out (one document) or --out-dir (one per epoch)")
+        return 2
 
     epochs = sorted(d for d in args.watch_root.iterdir()
                     if d.is_dir() and any(d.glob("*.json")))
@@ -538,20 +907,31 @@ def main() -> int:
         print(f"no epochs under {args.watch_root}")
         return 1
 
+    if args.out_dir is not None:
+        written = write_epoch_tree(args.watch_root, args.work_root, args.out_dir,
+                                   transcripts=not args.no_transcripts, since=args.since)
+        total = sum(p.stat().st_size for p in written)
+        print("%s  (%d epoch(s), %s bytes, index at %s)"
+              % (args.out_dir, len(written), format(total, ","), args.out_dir / "INDEX.md"))
+        if args.out is None:
+            return 0
+
     head: List[str] = []
     head.append("# Epoch review — the same prompts, vanilla against llama-leash\n")
-    head.append("Oldest epoch first. Each section carries, in this order:\n")
-    head.append("1. **The prompt** fed for every task that epoch, read from the manifest "
+    head.append("Oldest epoch first. Sections are numbered in the order they appear:\n")
+    head.append("1. **The changes committed** since the previous epoch, with the defect "
+                "each names.")
+    head.append("2. **The prompt** fed for every task that epoch, read from the manifest "
                 "as of that epoch's commit — not today's, because the corpus itself has "
-                "been edited during the campaign.")
-    head.append("2. **The resulting code**, in full, for each arm.")
-    head.append("3. **Time and tokens by phase** — real sub-sessions for `conductor`, "
-                "per-turn for `baseline`, which has no phase structure to group.")
-    head.append("4. **The transcript** of every turn — what the model was thinking, "
-                "which tools it called with which arguments, what came back, and what "
-                "it said. Long blocks are clipped and every clip states how much it "
-                "cut.")
-    head.append("5. **The changes committed** since the previous epoch.\n")
+                "been edited during the campaign — and labelled with which manifest "
+                "defined it.")
+    head.append("3. Then, per arm: **3a** time and tokens by phase (real sub-sessions for "
+                "`conductor`, per-turn for the flat arms); **3b** the resulting code in "
+                "full; **3c** every sub-agent dispatched, with the prompt it was given "
+                "and the reply it returned; **3d** the transcript of every turn — what "
+                "the model was thinking, which tools it called with which arguments, "
+                "what came back, and what it said. Long blocks are clipped and every "
+                "clip states how much it cut.\n")
     for arm in ARMS:
         head.append(f"- **`{arm}`** — {ARM_BLURB[arm]}")
     head.append("")

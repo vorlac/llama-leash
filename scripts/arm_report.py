@@ -19,7 +19,7 @@ import json
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 REPO = Path(__file__).resolve().parent.parent
 ARMS = ("baseline", "doctrine", "conductor")
@@ -85,6 +85,34 @@ def source_files(root: Path, include_gauge: bool = False) -> Dict[str, str]:
         except OSError:
             continue
     return out
+
+
+def seed_files(task: Dict[str, Any], repo_root: Path) -> Dict[str, str]:
+    """The tree an arm started from, in whichever dialect its manifest speaks.
+
+    `bench/conductor-tasks.json` embeds the seed inline as `seedFiles`; every
+    `bench/corpus-*.json` names a `seedDir` under the repository instead. A
+    reader that knows only one dialect renders the other as an empty tree, and
+    an empty tree reads as a fact about the task rather than as a fact about the
+    reader.
+
+    A `seedDir` naming a directory that is not on disk raises rather than
+    returning {}: absent from the manifest and absent from the checkout are
+    different findings, and only the second is a broken tree.
+    """
+    inline = task.get("seedFiles")
+    if inline:
+        return dict(inline)
+    relpath = task.get("seedDir")
+    if not relpath:
+        return {}
+    root = Path(repo_root) / relpath
+    if not root.is_dir():
+        raise FileNotFoundError(
+            "task %r names seedDir %r, which is not a directory under %s"
+            % (task.get("id", "?"), relpath, repo_root)
+        )
+    return source_files(root)
 
 
 def fence(path: str) -> str:
@@ -233,7 +261,7 @@ def render(tasks: List[dict], work_root: Path, results_dir: Path, model: str,
         w(task.get("prompt", "").replace("\\n", "\n"))
         w("```\n")
 
-        seeds = task.get("seedFiles", {}) or {}
+        seeds = seed_files(task, REPO)
         w(f"## What it started from  ({len(seeds)} file(s))\n")
         for path, body in sorted(seeds.items()):
             w(f"`{path}`\n")

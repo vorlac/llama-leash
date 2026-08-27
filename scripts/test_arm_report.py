@@ -7,12 +7,19 @@ not be presented as its work, and an arm that produced nothing must SAY so rathe
 than render an empty section a reader will read as "no diff shown".
 """
 
+import shutil
 import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 
-from arm_report import STALE_TREE_TOLERANCE_S, outcome_line, source_files, tree_matches_result
+from arm_report import (
+    STALE_TREE_TOLERANCE_S,
+    outcome_line,
+    seed_files,
+    source_files,
+    tree_matches_result,
+)
 
 
 class SourceFilesTest(unittest.TestCase):
@@ -123,3 +130,42 @@ class StaleTreeTest(unittest.TestCase):
             cell = self._cell(tmp)
             for record in (None, {}, {"startedIso": ""}, {"startedIso": "not a date"}):
                 self.assertFalse(tree_matches_result(cell, record), record)
+
+
+class SeedFilesTest(unittest.TestCase):
+    """Two manifests, two dialects, one report.
+
+    `bench/conductor-tasks.json` carries its seed inline as `seedFiles`; every
+    `bench/corpus-*.json` names a `seedDir` on disk instead. A report that knows
+    only the first renders "What it started from (0 file(s))" for an eight-file
+    seed, and 0 reads as "the arm started from nothing" rather than as "this
+    reader does not speak this dialect".
+    """
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="seed-files-"))
+        self.addCleanup(shutil.rmtree, str(self.tmp), True)
+
+    def test_the_inline_dialect_is_returned_as_is(self):
+        task = {"id": "t", "seedFiles": {"src/a.py": "print(1)\n"}}
+        self.assertEqual(seed_files(task, self.tmp), {"src/a.py": "print(1)\n"})
+
+    def test_a_seed_dir_is_read_from_disk(self):
+        seed = self.tmp / "bench" / "corpus" / "seed"
+        (seed / "src").mkdir(parents=True)
+        (seed / "src" / "registry.py").write_text("REG = {}\n")
+        (seed / "README.md").write_text("hello\n")
+        task = {"id": "t", "seedDir": "bench/corpus/seed"}
+        self.assertEqual(
+            seed_files(task, self.tmp),
+            {"README.md": "hello\n", "src/registry.py": "REG = {}\n"},
+        )
+
+    def test_a_task_with_neither_is_genuinely_empty(self):
+        self.assertEqual(seed_files({"id": "t"}, self.tmp), {})
+
+    def test_a_seed_dir_that_does_not_exist_is_reported_as_missing(self):
+        """Absent on disk and absent from the manifest must not read alike."""
+        task = {"id": "t", "seedDir": "bench/corpus/gone"}
+        with self.assertRaises(FileNotFoundError):
+            seed_files(task, self.tmp)
