@@ -128,7 +128,7 @@ EFFECTIVE_SLOT_COUNT: 6
 CTX_PER_SLOT_NO_PARALLEL: 8192
 CTX_PER_SLOT_WITH_PARALLEL: 1536
 CTX_PER_SLOT_PINNED_ARGV: 8192
-PER_SLOT_CONTEXT_ARGV: --parallel <slots> --ctx-size 196608
+PER_SLOT_CONTEXT_ARGV: --parallel <slots> --ctx-size 393216 --cache-ram 4096
 AUTOLOAD_LATENCY_MS: 9120
 ```
 
@@ -239,6 +239,38 @@ campaign (`served_per_slot_context`): the parent's own `/props`, with no model n
 Also worth recording: `kv_unified` flips from `'true'` to `'false'` the moment `--parallel` is
 passed. The default configuration shares one KV cache across 4 slots; the parallel configuration
 partitions it.
+
+**(e) The served default after the epoch-21 measurement — `per_slot_context = 65536`,
+`--ctx-size 393216 --cache-ram 4096` (measured 2026-08-28, qwen3.8-27b Q6_K on the same 64 GB
+M4 Max).** (d)'s window compacted the plan and plan-review stages repeatedly, so the window was
+raised against the KV rate rather than against a guess. llama-server reports the rate directly:
+
+```
+$ llama-server --model qwen3.8-27b/…Q6_K.gguf --ctx-size 16384 --parallel 1 -lv 10
+print_info: n_layer               = 64
+print_info: n_head_kv             = 4
+print_info: n_embd_head_k         = 256
+print_info: n_ctx_train           = 262144
+llama_kv_cache: size = 1024.00 MiB ( 16384 cells,  16 layers,  1/1 seqs), K (f16): 512.00 MiB, V (f16): 512.00 MiB
+llama_memory_recurrent: size =  149.62 MiB (     1 cells,  64 layers,  1 seqs  0 rs_seq)
+```
+
+**64 KiB per token per sequence.** Only 16 of the 64 layers hold a KV cache; the other 48 are
+recurrent and cost a fixed 149.62 MiB per sequence rather than scaling with the window. The
+memory is therefore `(slots × per_slot) × 64 KiB` and is indifferent to how the product splits:
+
+```
+$ ps -o rss= -p <server>   # after load, before any request
+3 × 131072   ->  24.0 GiB KV, 1.91 GiB compute   ->  rss = 44.7 GiB
+4 ×  98304   ->  24.0 GiB KV, 1.97 GiB compute   ->  rss = 44.9 GiB
+```
+
+393,216 cells is what this host holds beside 20.46 GiB of weights. `--cache-ram` is emitted with
+`--ctx-size` because llama-server's 8192 MiB default prompt cache sits ON TOP of that and put the
+peak at ~52.7 GiB of 64, which is where the `making room for prompt cache entry` evictions in
+`.data/configs/server.log` come from.
+
+`n_ctx_train = 262144`, so the 131072 the benchmark serves needs no RoPE scaling.
 
 #### Concurrency behaviour at 6 slots
 

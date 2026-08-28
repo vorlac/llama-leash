@@ -153,7 +153,7 @@ ARMS = ("baseline", "doctrine", "conductor")
 #
 #   RESULTS_DIR = None                              fresh, timestamped
 #   RESULTS_DIR = ".data/benchmark/my-campaign"     fixed; resumes
-RESULTS_DIR: Optional[str] = ".data/benchmark/watch/step6-grid2048-8h"
+RESULTS_DIR: Optional[str] = ".data/benchmark/watch/step8-context-128k"
 
 # Where each cell's throwaway git repo is built. None means the driver's
 # default, $TMPDIR/llama-leash-conductor-work. The layout underneath is
@@ -236,11 +236,36 @@ PREVENT_SLEEP = True
 # concurrently, so a slot count below that fan-out serializes them and shows up
 # as wall clock rather than as a refusal. Three is the observed reviewer wave.
 #
-# The product is the memory. 3 x 65536 is the same 196,608 total as the 6 x
-# 32768 it replaces, so the window doubles at no cost in KV cache. Raise the
-# product only if the machine has the memory to hold it.
+# The product is the memory, and the rate is now measured rather than inferred.
+# On qwen3.8-27b Q6_K, llama-server reports:
+#
+#   llama_kv_cache: size = 1024.00 MiB (16384 cells, 16 layers, 1/1 seqs)
+#
+# 64 KiB per token per sequence: 16 of the model's 64 layers hold a KV cache
+# (n_head_kv 4, n_embd_head 256) and the other 48 are recurrent, costing a fixed
+# 149.62 MiB per sequence instead of scaling. So the memory is (slots x per-slot)
+# x 64 KiB, and how the product is SPLIT costs nothing:
+#
+#   3 x 131072  ->  24.0 GiB KV, 44.7 GiB resident   (measured)
+#   4 x  98304  ->  24.0 GiB KV, 44.9 GiB resident   (measured)
+#   4 x 131072  ->  32.0 GiB KV                       (does not fit)
+#
+# 393,216 cells is the ceiling this 64 GiB host holds beside 20.46 GiB of weights
+# and the bounded prompt cache (cw.PROMPT_CACHE_RAM_MIB). It is spent on WINDOW
+# rather than on slots because that is what the measurements say costs: the
+# epoch-21 run attributed 269 minutes to compaction and perhaps 25 to serializing
+# the fourth review lens against three slots. The model's own n_ctx_train is
+# 262144, so 131072 needs no RoPE scaling and costs nothing in quality.
+#
+# What this buys, through opencode's own arithmetic
+# (cw.opencode_usable_window): the compaction threshold goes 49,152 -> 111,072
+# and the output cap 16,384 -> 32,768. Both walls move out together, because the
+# reserve saturates at OPENCODE_COMPACTION_BUFFER once output clears 20,000 —
+# below that, raising one wall lowers the other.
+#
+# Raise the product only against a fresh measurement.
 SERVE_SLOTS = 3
-SERVE_PER_SLOT_CONTEXT = 65536
+SERVE_PER_SLOT_CONTEXT = 131072
 
 # ── WHAT YOU SEE ─────────────────────────────────────────────────────────────
 
@@ -526,6 +551,30 @@ def start_services(served: str, ends: Dict[str, int]) -> Optional[dict]:
         print("      cmake --build .out/build/clang-relwdebinfo --target llama-router")
         _terminate(server)
         return None
+
+    # The router config is regenerated for THIS run and read back before the
+    # supervisor is handed the path. serve.py --no-shell os.execv's into
+    # llama-server before its own write_router_config runs, so without this step
+    # whatever file is on disk governs the run: epoch 22 ran under an
+    # eight-day-old config that admitted 6 inflight against 3 served slots and
+    # timed queued work against a dead generation's 600s constant. The check
+    # reads the file the router will load, not this process's dict.
+    config_path = pathlib.Path(REPO_ROOT) / cw.ROUTER_CONFIG_RELPATH
+    try:
+        handed = cw.refresh_router_config(
+            config_path,
+            ends["host"], ends["router"], ends["host"], ends["upstream"],
+            SERVE_SLOTS, root=pathlib.Path(REPO_ROOT),
+        )
+    except cw.WiringError as exc:
+        print("  router config preflight refused the run: %s" % exc)
+        _terminate(server)
+        return None
+    print(
+        "  router config %s (maxInflightPerModel=%s queueTimeoutMs=%s)"
+        % (config_path, handed["admission"]["maxInflightPerModel"],
+           handed["admission"]["queueTimeoutMs"])
+    )
 
     supervisor = cw.start_router_supervisor(
         binary,

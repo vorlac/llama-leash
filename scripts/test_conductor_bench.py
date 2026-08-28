@@ -2678,11 +2678,17 @@ class PlanAndCellTests(unittest.TestCase):
         # The observed pairing that lost a cell, and the one that replaces it.
         self.assertEqual(cw.opencode_usable_window(32768), 24576)
         self.assertEqual(cw.opencode_usable_window(65536), 49152)
+        # The launcher's own slot, pinned by value so a change to it is a change a
+        # reader has to make deliberately. At 131072 the output reserve saturates
+        # at OPENCODE_COMPACTION_BUFFER, which is why both the compaction
+        # threshold and the output cap move outward together above ~80k where
+        # below it they trade against each other.
         self.assertEqual(
             cw.opencode_usable_window(served_constant("SERVE_PER_SLOT_CONTEXT")),
-            49152,
+            111072,
             "the launcher serves a slot whose usable window is not what this pins",
         )
+        self.assertEqual(cw.opencode_model_limit(131072)["output"], 32768)
         for per_slot in (32768, 65536, 98304, 131072):
             limit = cw.opencode_model_limit(per_slot)
             self.assertEqual(limit["context"], per_slot, "opencode is told the served slot")

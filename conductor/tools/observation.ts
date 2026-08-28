@@ -369,7 +369,7 @@ export function deriveStrainSignals(input: ObservationInput): StrainSignals {
 // scripts/conductor_wiring.py PER_SLOT_CONTEXT_TOKENS, the window each slot is
 // served by default. Two copies of one number in two languages; the parity test
 // in tests/observation.test.ts is what keeps them equal.
-export const DEFAULT_PER_SLOT_CONTEXT_TOKENS = 32768;
+export const DEFAULT_PER_SLOT_CONTEXT_TOKENS = 65536;
 
 export const BREAKDOWN_THRESHOLDS = {
   // Above this share of adjudicated calls refused, the session is spending its

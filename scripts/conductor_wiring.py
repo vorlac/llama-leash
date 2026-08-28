@@ -95,8 +95,14 @@ DEFAULT_MAX_READERS = 6
 # WHAT STILL GUARDS THE RUN, because this is not "no timeouts":
 #   - router/router.hpp kRelayTimeoutSeconds (600) is a PER-READ timeout, so a
 #     session that genuinely stops emitting dies after 600s of silence. That is
-#     a liveness signal, which is the correct shape, and it has never fired on
-#     healthy work.
+#     a liveness signal, which is the correct shape - but it is NOT proof
+#     against healthy work: in epoch 22 it fired twice, at upstreamMs 600001
+#     and 600003, on a lens that a stale router config had over-admitted into
+#     llama-server's internal queue (no slot, so no tokens, so 600s of
+#     "silence" that was really a queue). The lens then succeeded in 353s once
+#     a slot opened. A backstop that has fired on healthy work is a backstop
+#     whose preconditions must hold, which is what the router-config preflight
+#     in run_and_watch.start_services exists to guarantee.
 #   - the cell's own tier budget remains as the single outer bound, and is the
 #     only thing that stops a run looping in the FSM where every turn emits
 #     tokens and the relay guard therefore never sees silence.
@@ -155,6 +161,16 @@ ROUTER_MACHINE_KEYS = (
     ("upstream", "host"),
     ("upstream", "port"),
     ("admission", "maxInflightPerModel"),
+    # queueTimeoutMs is DERIVED, not hand-editable: ROUTER_QUEUE_TIMEOUT_MS
+    # carries an invariant against the sub-session watchdog (every role timeout
+    # sits strictly above it, so a queue timeout reports as itself), and a value
+    # left behind by an earlier generation breaks that invariant silently.
+    # Measured in epoch 22: an eight-day-old config carried 600000 against the
+    # current 7200000, and the router 502'd a healthy queued lens twice at
+    # upstreamMs 600001/600003 - work that then succeeded in 353 s. An operator
+    # who needs a different value edits ROUTER_QUEUE_TIMEOUT_MS, where the
+    # invariant is stated and checked.
+    ("admission", "queueTimeoutMs"),
     ("metrics", "ledgerPath"),
 )
 
@@ -170,7 +186,14 @@ ROUTER_MACHINE_KEYS = (
 # 11,441 tokens, and an 8192-token slot refused it outright. The slot has to hold
 # that request plus the conversation that follows it, so it is four times the
 # measurement; six slots of 32768 loaded as a 34.1 GB child on the 64 GB host.
-PER_SLOT_CONTEXT_TOKENS = 32768
+# Raised from 32768 against the measured KV rate below. At DEFAULT_MAX_READERS
+# slots this is 393,216 cells x 64 KiB = 24.0 GiB of KV, which with 20.46 GiB of
+# weights is the 44.7 GiB the host was measured holding — the same total the
+# benchmark spends as 3 x 131072. The budget is the CELL COUNT, not the window:
+# slots x per-slot window is what the memory pays for, and either split of
+# 393,216 cells costs the same. A larger product is a memory decision and must be
+# measured, not assumed.
+PER_SLOT_CONTEXT_TOKENS = 65536
 ORCHESTRATOR_FIRST_REQUEST_TOKENS = 11441
 
 # opencode 1.18.15 session/overflow.ts: a session is compacted once its token
@@ -259,6 +282,29 @@ def derive_slots(max_readers: Any) -> int:
     return max_readers if max_readers > 1 else 1
 
 
+# The prompt cache's host-memory budget, in MiB, emitted wherever --ctx-size is.
+#
+# llama-server keeps evicted conversations in a host-side prompt cache so a
+# resumed session skips its prefill, and it defaults that cache to 8192 MiB ON
+# TOP of the weights and the KV. That default was written for a KV cache far
+# smaller than this one. Measured on qwen3.8-27b Q6_K (llama-server, Metal):
+#
+#   llama_kv_cache: size = 1024.00 MiB (16384 cells, 16 layers, 1/1 seqs)
+#
+# — 64 KiB per token per sequence, because 16 of the model's 64 layers hold a KV
+# cache at n_head_kv 4 x n_embd_head 256 and the other 48 are recurrent. So a
+# 3 x 131072 window is 24.0 GiB of KV, and the resident server measures 44.7 GiB
+# against 20.46 GiB of weights. The stock 8192 MiB cache puts the peak at
+# ~52.7 GiB of a 64 GiB host, which is where the "making room for prompt cache
+# entry" evictions come from: a cache too small to hold the sessions in flight
+# and large enough to crowd out the machine.
+#
+# 4096 MiB holds 65,536 tokens at this model's rate — half a slot's window, which
+# is one deep session's prefix surviving between turns, which is the whole job of
+# the cache. It puts the peak at ~48.7 GiB and leaves the host its margin.
+PROMPT_CACHE_RAM_MIB = 4096
+
+
 def parallel_server_args(slots: Any, ctx: Optional[int] = None) -> List[str]:
     """The llama-server arguments the derived slot count adds.
 
@@ -285,6 +331,8 @@ def parallel_server_args(slots: Any, ctx: Optional[int] = None) -> List[str]:
         args += ["--ctx-size", str(per_slot * count)]
     elif ctx is not None:
         args += ["--ctx-size", str(per_slot)]
+    if "--ctx-size" in args:
+        args += ["--cache-ram", str(PROMPT_CACHE_RAM_MIB)]
     return args
 
 
@@ -380,6 +428,79 @@ def merge_router_config(
     return merged
 
 
+def verify_router_admission(config: Dict[str, object], slots: int) -> None:
+    """Refuse a router config whose admission block does not match this run.
+
+    The check reads the DOCUMENT, not the module constants, because the failure
+    it exists to catch is exactly a document the constants never reached: the
+    epoch-22 cell ran under an eight-day-old conductor-router.json carrying
+    maxInflightPerModel 6 against 3 served slots, so the router admitted twice
+    the server's concurrency and the overflow queued invisibly inside
+    llama-server, where queueWaitMs is not measured. The constant-level tests
+    passed the whole time.
+    """
+    admission = config.get("admission")
+    admission = admission if isinstance(admission, dict) else {}
+    expected_inflight = derive_slots(slots)
+    got_inflight = admission.get("maxInflightPerModel")
+    if got_inflight != expected_inflight:
+        raise WiringError(
+            "router config admission.maxInflightPerModel is %r but this run serves "
+            "%d slots (expected %d): the file on disk was not generated for this "
+            "run and would admit work the server cannot hold"
+            % (got_inflight, slots, expected_inflight)
+        )
+    got_timeout = admission.get("queueTimeoutMs")
+    if got_timeout != ROUTER_QUEUE_TIMEOUT_MS:
+        raise WiringError(
+            "router config admission.queueTimeoutMs is %r, expected %d: a stale "
+            "value here re-times every queued request against a dead generation's "
+            "constants" % (got_timeout, ROUTER_QUEUE_TIMEOUT_MS)
+        )
+
+
+def refresh_router_config(
+    path: Path,
+    listen_host: str,
+    listen_port: int,
+    upstream_host: str,
+    upstream_port: int,
+    slots: int,
+    root: Optional[Path] = None,
+) -> Dict[str, object]:
+    """Regenerate the router config file and prove the write took.
+
+    Generate, merge over any hand edits, write, then READ THE FILE BACK and
+    verify the admission block against this run - the read-back is the point,
+    because the router loads the file, not this process's dict, and a file that
+    silently kept a stale value has already governed one experiment unnoticed.
+    Returns the read-back document. Raises WiringError when the file on disk
+    still disagrees with the run after the write.
+    """
+    base = REPO_ROOT if root is None else Path(root)
+    existing: Optional[Dict[str, object]] = None
+    if path.is_file():
+        try:
+            loaded = json.loads(path.read_text())
+            existing = loaded if isinstance(loaded, dict) else None
+        except (OSError, ValueError):
+            existing = None
+    generated = generate_router_config(
+        listen_host, listen_port, upstream_host, upstream_port, slots, root=base
+    )
+    merged = merge_router_config(existing, generated)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(merged, indent=2) + "\n")
+    try:
+        handed = json.loads(path.read_text())
+    except (OSError, ValueError) as exc:
+        raise WiringError("router config %s is unreadable after writing it: %s" % (path, exc))
+    if not isinstance(handed, dict):
+        raise WiringError("router config %s does not hold a JSON object after writing it" % path)
+    verify_router_admission(handed, slots)
+    return handed
+
+
 def load_fragment(root: Optional[Path] = None) -> Dict[str, object]:
     """conductor/opencode-fragment.json, consumed verbatim.
 
@@ -450,6 +571,20 @@ def apply_conductor_wiring(
     raw = load_fragment(where) if fragment is None else fragment
     resolved = substitute_harness_root(raw, where)
     config = merge_opencode_fragment(base, resolved)
+    # The conductor agent definitions are consumed VERBATIM, replacing any base
+    # entry of the same name outright. The deep merge above preserves base-only
+    # keys at every depth - the right behaviour for the provider block, and the
+    # wrong one for an agent definition: the base config carries the wiring too
+    # (fetch_models.py writes it there so a mid-session regen cannot strip it),
+    # so yesterday's fragment always sits underneath today's merge, and a key
+    # the fragment DROPS would survive in every generated config forever. A
+    # permission removed from the fragment must be removed, not merged around.
+    fragment_agents = resolved.get("agent")
+    if isinstance(fragment_agents, dict):
+        merged_agents = config.get("agent")
+        if isinstance(merged_agents, dict):
+            for name, entry in fragment_agents.items():
+                merged_agents[name] = copy.deepcopy(entry)
     limit = opencode_model_limit(PER_SLOT_CONTEXT_TOKENS if per_slot_ctx is None else per_slot_ctx)
 
     provider = (config.get("provider") or {}).get(PROVIDER_ID)

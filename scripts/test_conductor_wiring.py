@@ -374,7 +374,6 @@ class RouterConfigGeneration(WiringTestCase):
             "10.0.0.9", 9999, "10.0.0.9", 9998, 1, root=Path("/somewhere/else")
         )
         hand_edited["admission"]["maxQueued"] = 8
-        hand_edited["admission"]["queueTimeoutMs"] = 111111
         hand_edited["priorities"]["batch"] = 7
         hand_edited["affinity"]["contiguousDequeue"] = False
         hand_edited["schema"]["validateResponses"] = False
@@ -384,7 +383,6 @@ class RouterConfigGeneration(WiringTestCase):
         merged = cw.merge_router_config(hand_edited, generated)
 
         self.assertEqual(merged["admission"]["maxQueued"], 8)
-        self.assertEqual(merged["admission"]["queueTimeoutMs"], 111111)
         self.assertEqual(merged["priorities"]["batch"], 7)
         self.assertIs(merged["affinity"]["contiguousDequeue"], False)
         self.assertIs(merged["schema"]["validateResponses"], False)
@@ -397,13 +395,20 @@ class RouterConfigGeneration(WiringTestCase):
             merged["admission"]["maxInflightPerModel"],
             generated["admission"]["maxInflightPerModel"],
         )
+        # queueTimeoutMs is machine-derived, never a hand edit: it carries an
+        # invariant against the sub-session watchdog, and an epoch-22 cell ran
+        # under a stale 600000 that 502'd healthy queued work twice.
+        self.assertEqual(
+            merged["admission"]["queueTimeoutMs"],
+            generated["admission"]["queueTimeoutMs"],
+        )
         self.assertEqual(merged["metrics"]["ledgerPath"], generated["metrics"]["ledgerPath"])
         self.assertEqual(hand_edited, before, "merge_router_config must not mutate its input")
 
         # --fresh drops the hand edits, exactly as it already ignores serve-session.json.
         self.assertEqual(cw.merge_router_config(hand_edited, generated, fresh=True), generated)
 
-        # The seven machine-derived paths are declared once, not scattered.
+        # The eight machine-derived paths are declared once, not scattered.
         self.assertEqual(
             set(cw.ROUTER_MACHINE_KEYS),
             {
@@ -413,9 +418,101 @@ class RouterConfigGeneration(WiringTestCase):
                 ("upstream", "host"),
                 ("upstream", "port"),
                 ("admission", "maxInflightPerModel"),
+                ("admission", "queueTimeoutMs"),
                 ("metrics", "ledgerPath"),
             },
         )
+
+
+class RouterConfigRefresh(WiringTestCase):
+    """refresh_router_config: the launch-time regeneration and read-back.
+
+    The defect it closes: serve.py --no-shell os.execv's into llama-server
+    before its own write_router_config runs, so a campaign launched through
+    run_and_watch used to start the router off whatever file was on disk. The
+    epoch-22 cell ran under an eight-day-old config (maxInflightPerModel 6
+    against 3 served slots, queueTimeoutMs 600000 against 7200000) and the
+    router 502'd healthy queued work twice.
+    """
+
+    def _stale_config(self, path: Path) -> None:
+        stale = cw.generate_router_config(
+            LISTEN_HOST, LISTEN_PORT, UPSTREAM_HOST, UPSTREAM_PORT, 6, root=self.tmp
+        )
+        stale["admission"]["maxInflightPerModel"] = 6
+        stale["admission"]["queueTimeoutMs"] = 600000
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(stale))
+
+    def test_refresh_replaces_a_stale_admission_block(self) -> None:
+        path = self.tmp / "configs" / "conductor-router.json"
+        self._stale_config(path)
+
+        handed = cw.refresh_router_config(
+            path, LISTEN_HOST, LISTEN_PORT, UPSTREAM_HOST, UPSTREAM_PORT, 3, root=self.tmp
+        )
+
+        self.assertEqual(handed["admission"]["maxInflightPerModel"], cw.derive_slots(3))
+        self.assertEqual(handed["admission"]["queueTimeoutMs"], cw.ROUTER_QUEUE_TIMEOUT_MS)
+        # The return value IS the file: the router loads the path, not the dict.
+        on_disk = json.loads(path.read_text())
+        self.assertEqual(on_disk, handed)
+
+    def test_refresh_creates_the_file_when_none_exists(self) -> None:
+        path = self.tmp / "configs" / "conductor-router.json"
+        handed = cw.refresh_router_config(
+            path, LISTEN_HOST, LISTEN_PORT, UPSTREAM_HOST, UPSTREAM_PORT, 3, root=self.tmp
+        )
+        self.assertTrue(path.is_file())
+        self.assertEqual(handed["admission"]["maxInflightPerModel"], cw.derive_slots(3))
+
+    def test_refresh_keeps_hand_edits_outside_the_machine_keys(self) -> None:
+        path = self.tmp / "configs" / "conductor-router.json"
+        self._stale_config(path)
+        edited = json.loads(path.read_text())
+        edited["logging"]["level"] = "debug"
+        path.write_text(json.dumps(edited))
+
+        handed = cw.refresh_router_config(
+            path, LISTEN_HOST, LISTEN_PORT, UPSTREAM_HOST, UPSTREAM_PORT, 3, root=self.tmp
+        )
+        self.assertEqual(handed["logging"]["level"], "debug")
+
+    def test_verify_refuses_the_measured_stale_shape(self) -> None:
+        """The exact admission block that governed epoch 22 is refused by name."""
+        stale = cw.generate_router_config(
+            LISTEN_HOST, LISTEN_PORT, UPSTREAM_HOST, UPSTREAM_PORT, 3, root=self.tmp
+        )
+        stale["admission"]["maxInflightPerModel"] = 6
+        stale["admission"]["queueTimeoutMs"] = 600000
+        with self.assertRaises(cw.WiringError) as caught:
+            cw.verify_router_admission(stale, 3)
+        self.assertIn("maxInflightPerModel", str(caught.exception))
+
+        stale["admission"]["maxInflightPerModel"] = cw.derive_slots(3)
+        with self.assertRaises(cw.WiringError) as caught:
+            cw.verify_router_admission(stale, 3)
+        self.assertIn("queueTimeoutMs", str(caught.exception))
+
+    def test_verify_accepts_a_freshly_generated_config(self) -> None:
+        generated = cw.generate_router_config(
+            LISTEN_HOST, LISTEN_PORT, UPSTREAM_HOST, UPSTREAM_PORT, 3, root=self.tmp
+        )
+        cw.verify_router_admission(generated, 3)  # must not raise
+
+    def test_run_and_watch_calls_the_refresh_before_the_supervisor(self) -> None:
+        """Pinned textually, the same way served_constant pins launch values:
+        importing the launcher runs its module body, so the invariant is read
+        out of the file. The refresh must appear in start_services BEFORE the
+        supervisor start, or the stale-file defect is back."""
+        text = (REPO_ROOT / "scripts" / "run_and_watch.py").read_text()
+        start = text.index("def start_services")
+        end = text.index("\ndef ", start + 1)
+        body = text[start:end]
+        refresh_at = body.find("cw.refresh_router_config(")
+        supervisor_at = body.find("cw.start_router_supervisor(")
+        self.assertGreater(refresh_at, -1, "start_services must regenerate the router config")
+        self.assertGreater(supervisor_at, refresh_at, "the refresh must run before the supervisor starts")
 
 
 class ParallelDerivation(WiringTestCase):
@@ -490,7 +587,7 @@ class ParallelDerivation(WiringTestCase):
         self.assertEqual(
             cmd,
             head_server_command(self.configs, UPSTREAM_HOST, UPSTREAM_PORT, None)
-            + ["--metrics", "--parallel", "1", "--ctx-size", "4096"],
+            + ["--metrics", "--parallel", "1", "--ctx-size", "4096", "--cache-ram", "4096"],
         )
 
     def test_12_1_ctx_configured_reaches_the_derivation(self) -> None:
@@ -686,6 +783,37 @@ class FragmentMerge(WiringTestCase):
             str(root / "conductor" / "doctrine" / "absent-pack.md"),
             str(caught.exception),
         )
+
+    def test_fragment_agent_definitions_are_verbatim(self) -> None:
+        """A key dropped from the fragment does not survive via the base config.
+
+        The base carries the wiring too, so the session-time merge always runs
+        over yesterday's fragment. Deep-merge semantics keep base-only keys, so
+        without wholesale agent replacement a permission REMOVED from the
+        fragment would govern every generated config forever - measured: the
+        epoch-22 stall traced to `permission.question: "ask"`, and deleting it
+        from the fragment alone leaves it standing in .data/configs.
+        """
+        base = base_opencode_config(UPSTREAM_HOST, UPSTREAM_PORT)
+        base["agent"] = {
+            "conductor-test-writer": {
+                "mode": "subagent",
+                "description": "Writes one item's failing test",
+                "permission": {"question": "ask"},
+                "tools": {"task": False},
+            }
+        }
+        merged = cw.apply_conductor_wiring(
+            base, cw.openai_base_url(UPSTREAM_HOST, UPSTREAM_PORT), root=REPO_ROOT
+        )
+        writer = merged["agent"]["conductor-test-writer"]
+        self.assertNotIn(
+            "question",
+            writer.get("permission", {}),
+            "a permission the fragment dropped must not leak back in from the base",
+        )
+        self.assertIs(writer["tools"]["question"], False)
+        self.assertIs(writer["tools"]["task"], False)
 
     def test_12_1_autoupdate_off(self) -> None:
         """[12.1-autoupdate-off] C-012: the generated config pins opencode auto-update off."""
