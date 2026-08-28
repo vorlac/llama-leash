@@ -744,6 +744,68 @@ def live_conductor_run() -> Optional[str]:
     return newest
 
 
+def _tail_text(path: str, byte_count: int = 65536) -> str:
+    """The last `byte_count` bytes of a file, decoded leniently."""
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            size = fh.tell()
+            fh.seek(max(0, size - byte_count))
+            return fh.read().decode("utf-8", "replace")
+    except OSError:
+        return ""
+
+
+# Whether the current stall episode has stamped its sentinel yet, so one episode
+# appends one line rather than one per poll. Reset the moment traffic resumes.
+_STALL_STAMPED = False
+
+
+def stall_alarm(run_dir: Optional[str], results: str, now: Optional[float] = None) -> List[str]:
+    """Feed 0: the ledger stall detector.
+
+    The verdict is conductor_wiring.stall_verdict — no completed router request
+    and no journal record for STALL_ALARM_SECONDS. It fires an alarm block at
+    the top of every refresh and appends one sentinel line per episode, and it
+    aborts NOTHING: the watching session applies snapshot -> kill -> record.
+    The sentinel lands in the conductor run dir when a cell is live, else in
+    the results dir, under a name deliberately not ending in .json — a results
+    directory's *.json files are cell rows and its resume ledger.
+    """
+    global _STALL_STAMPED
+    now_ms = int((time.time() if now is None else now) * 1000)
+    last_completed = cw.ledger_last_completed_ms(_tail_text(LEDGER))
+    last_journal = None
+    if run_dir is not None:
+        last_journal = cw.journal_last_ts_ms(_tail_text(os.path.join(run_dir, "journal.jsonl")))
+    stalled, silent_ms = cw.stall_verdict(
+        now_ms, int(STARTED_AT * 1000), last_completed, last_journal)
+    if not stalled:
+        _STALL_STAMPED = False
+        return []
+    lines = [
+        rule("!! STALL ALARM "),
+        "  NO COMPLETED REQUEST FOR %.1f MINUTES (threshold %d min)."
+        % (silent_ms / 60000.0, cw.STALL_ALARM_SECONDS // 60),
+        "  This detector aborts nothing. Snapshot the run dir, kill, and record",
+        "  the stall with its journal tail - never silently retry.",
+    ]
+    if not _STALL_STAMPED:
+        sentinel_dir = run_dir if run_dir is not None else results
+        try:
+            with open(os.path.join(sentinel_dir, cw.STALL_SENTINEL_NAME), "a") as fh:
+                fh.write(json.dumps({
+                    "firedAtIso": datetime.now().astimezone().isoformat(),
+                    "silentSeconds": round(silent_ms / 1000.0, 1),
+                    "lastCompletedMs": last_completed,
+                    "lastJournalMs": last_journal,
+                }) + "\n")
+            _STALL_STAMPED = True
+        except OSError:
+            pass  # the console block above is the alarm; the sentinel is the durable copy
+    return lines
+
+
 def conductor_console(run_dir: str) -> str:
     """Feed 3: the live console, via the read-only observer."""
     if shutil.which("node") is None:
@@ -775,12 +837,14 @@ def conductor_console(run_dir: str) -> str:
 def dashboard(results: str, total_cells: int) -> str:
     blocks = [rule("== %s  elapsed %s " % (datetime.now().strftime("%H:%M:%S"), hms(time.time() - STARTED_AT)))]
 
+    run_dir = live_conductor_run()
+    blocks.extend(stall_alarm(run_dir, results))
+
     if SHOW_SCOREBOARD:
         blocks.append(rule("SCOREBOARD — all arms "))
         blocks.append(scoreboard(results, total_cells))
 
     if SHOW_CONDUCTOR:
-        run_dir = live_conductor_run()
         blocks.append(rule("CONDUCTOR — live "))
         if run_dir is None:
             blocks.append("  no conductor cell is running yet.")

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import copy
 import json
+from datetime import datetime
 import os
 import re
 import shutil
@@ -364,6 +365,102 @@ def opencode_usable_window(per_slot_ctx: Any) -> int:
     limit = opencode_model_limit(per_slot_ctx)
     reserve = min(limit["output"], OPENCODE_OUTPUT_TOKEN_MAX) or OPENCODE_OUTPUT_TOKEN_MAX
     return limit["context"] - min(OPENCODE_COMPACTION_BUFFER, reserve)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# The ledger stall detector — the run's watchdog, OUTSIDE the plugin.
+#
+# Epoch 22's terminal event was invisible to every in-band guard: a test-writer
+# session parked on a permission prompt had NO request in flight at all, so the
+# router's per-read timeout had nothing to time out, llama-server had no task,
+# and the plugin's event stream had already gone quiet. The one instrument that
+# saw it perfectly was the router ledger: no completed request for 78.7 minutes.
+# The signature of that whole failure class is not silence in any event stream —
+# it is no completed HTTP request, whatever the cause.
+#
+# The threshold sits ABOVE the measured healthy maxima, never at a round number:
+# the largest healthy single generation on record is 26.9 minutes (a reviewer
+# lens, 5,615 tokens at 3.48 tok/s) and the largest healthy gap between
+# plugin-observable events is 30.0 minutes (twice, on lenses that then SUCCEEDED
+# on retry). 45 minutes clears both with margin; a 20-minute deadline kills
+# roughly one healthy dispatch in ten, preferentially in planner and reviewer —
+# 70% of the conductor arm's decode.
+#
+# The verdict is NEVER terminal. The watcher alarms — a console line plus a
+# sentinel file in the run dir — and aborts nothing itself; the watching session
+# applies snapshot -> kill -> record. A fanout-side deadline was refuted on this
+# exact ground: its fire is terminal, and it would have destroyed the two lens
+# retries that completed epoch 22's plan-review wave.
+STALL_ALARM_SECONDS = 2700
+
+# No .json extension: a results directory's *.json files are cell rows and its
+# presence there is conductor_bench's resume ledger.
+STALL_SENTINEL_NAME = "STALL_ALARM"
+
+
+def ledger_last_completed_ms(tail_text: str) -> Optional[int]:
+    """The newest `completedAt` in a tail of the router ledger, epoch millis.
+
+    Walks complete lines from the end, so the torn last line of a file being
+    appended to right now costs that line and nothing else. The ledger is
+    append-only in completion order, which is what makes the last stamped line
+    the newest completion.
+    """
+    for line in reversed(tail_text.splitlines()):
+        line = line.strip()
+        if not line.startswith("{") or '"completedAt"' not in line:
+            continue
+        try:
+            stamp = json.loads(line).get("completedAt")
+        except ValueError:
+            continue
+        ms = _iso_ms(stamp)
+        if ms is not None:
+            return ms
+    return None
+
+
+def journal_last_ts_ms(tail_text: str) -> Optional[int]:
+    """The newest `ts` in a tail of a conductor journal, epoch millis."""
+    for line in reversed(tail_text.splitlines()):
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            ts = json.loads(line).get("ts")
+        except ValueError:
+            continue
+        if isinstance(ts, (int, float)):
+            return int(ts)
+    return None
+
+
+def _iso_ms(stamp: Any) -> Optional[int]:
+    if not isinstance(stamp, str) or not stamp:
+        return None
+    try:
+        return int(datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp() * 1000)
+    except ValueError:
+        return None
+
+
+def stall_verdict(
+    now_ms: int,
+    started_ms: int,
+    last_completed_ms: Optional[int],
+    last_journal_ms: Optional[int],
+    threshold_s: int = STALL_ALARM_SECONDS,
+) -> Tuple[bool, int]:
+    """(stalled, silent_ms): whether the run has completed nothing for too long.
+
+    The reference is the NEWEST of the ledger's last completion, the journal's
+    last record and the watcher's own start. The start is in the set so a ledger
+    whose newest row belongs to yesterday's run cannot fire the alarm before
+    this run has made a single request.
+    """
+    reference = max(ms for ms in (started_ms, last_completed_ms, last_journal_ms) if ms is not None)
+    silent_ms = max(0, now_ms - reference)
+    return silent_ms >= threshold_s * 1000, silent_ms
 
 
 def generate_router_config(

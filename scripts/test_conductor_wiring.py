@@ -3222,3 +3222,112 @@ class RouterBinaryFreshness(unittest.TestCase):
         self._write("router/metrics.hpp", 1000.0)
         self._plant_binary(2000.0)
         self.assertIsNone(cw.router_staleness_refusal(self.binary, self.tmp))
+
+
+class LedgerStallDetector(unittest.TestCase):
+    """[rank7] the run's watchdog, outside the plugin.
+
+    Epoch 22's terminal stall — a sub-session parked on a permission prompt at
+    zero GPU for 78.7 minutes — was invisible to the router's per-read timeout
+    (no request in flight), to llama-server (no task) and to the plugin (its
+    event stream had gone quiet). The one instrument that saw it was the router
+    ledger: no completed request. These pin the pure verdict and the tail
+    readers; the replay over the archived runs is recorded in the register.
+    """
+
+    T0 = 1_787_898_942_145  # an arbitrary run-start instant, epoch millis
+
+    def test_fires_at_the_threshold_and_never_one_poll_before(self) -> None:
+        threshold_ms = cw.STALL_ALARM_SECONDS * 1000
+        last = self.T0 + 600_000
+        before = cw.stall_verdict(last + threshold_ms - 1, self.T0, last, None)
+        at = cw.stall_verdict(last + threshold_ms, self.T0, last, None)
+        self.assertFalse(before[0], "one millisecond under the threshold is not a stall")
+        self.assertTrue(at[0], "the threshold instant itself fires")
+        self.assertEqual(at[1], threshold_ms)
+
+    def test_the_watcher_start_gates_a_stale_ledger(self) -> None:
+        """Yesterday's newest row must not fire the alarm before this run has
+        made a single request: the reference is the NEWEST of start, ledger and
+        journal."""
+        stale_ledger = self.T0 - 86_400_000
+        stalled, silent = cw.stall_verdict(self.T0 + 60_000, self.T0, stale_ledger, None)
+        self.assertFalse(stalled)
+        self.assertEqual(silent, 60_000, "silence is measured from the watcher's own start")
+
+    def test_the_newest_of_journal_and_ledger_wins(self) -> None:
+        ledger = self.T0 + 100_000
+        journal = self.T0 + 200_000
+        _, silent = cw.stall_verdict(self.T0 + 260_000, self.T0, ledger, journal)
+        self.assertEqual(silent, 60_000)
+
+    def test_threshold_sits_above_the_measured_healthy_maxima(self) -> None:
+        """26.9-minute single generation and a 30.0-minute inter-event gap both
+        SUCCEEDED; nothing below ~40 minutes is safe, and the value is 45."""
+        self.assertEqual(cw.STALL_ALARM_SECONDS, 2700)
+
+    def test_ledger_tail_reader_takes_the_newest_stamp_and_survives_a_torn_line(self) -> None:
+        row = ('{"completedAt":"2026-08-28T09:01:54.360+00:00","completionTokens":511,'
+               '"role":"testWriter","status":200}')
+        older = ('{"completedAt":"2026-08-28T08:00:00.000+00:00","completionTokens":9,'
+                 '"role":"planner","status":200}')
+        torn = '{"completedAt":"2026-08-28T09:5'
+        text = older + "\n" + row + "\n" + torn
+        ms = cw.ledger_last_completed_ms(text)
+        self.assertEqual(ms, 1_787_907_714_360, "09:01:54.360Z — the c828 tail row, to the ms")
+
+    def test_journal_tail_reader_takes_the_newest_ts(self) -> None:
+        text = '{"seq":139,"ts":1787907714000}\n{"seq":140,"ts":1787907714221}\n{"seq":141,"ts":'
+        self.assertEqual(cw.journal_last_ts_ms(text), 1_787_907_714_221)
+
+    def test_readers_answer_none_for_no_evidence(self) -> None:
+        self.assertIsNone(cw.ledger_last_completed_ms(""))
+        self.assertIsNone(cw.journal_last_ts_ms("not json at all"))
+
+    def test_the_sentinel_is_not_a_cell_row(self) -> None:
+        self.assertFalse(cw.STALL_SENTINEL_NAME.endswith(".json"),
+                         "a results dir's *.json files are conductor_bench's resume ledger")
+
+    def test_the_alarm_path_terminates_nothing(self) -> None:
+        """The refuted candidate's defect was a TERMINAL fire. The watcher's
+        alarm function must contain no kill, no terminate and no signal — it
+        alarms, and the watching session decides."""
+        source = (REPO_ROOT / "scripts" / "run_and_watch.py").read_text()
+        tree = ast.parse(source)
+        fn = next(node for node in ast.walk(tree)
+                  if isinstance(node, ast.FunctionDef) and node.name == "stall_alarm")
+        forbidden = {"kill", "terminate", "_terminate", "send_signal", "killpg"}
+        called = {node.func.attr for node in ast.walk(fn)
+                  if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)}
+        called |= {node.func.id for node in ast.walk(fn)
+                   if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)}
+        self.assertEqual(called & forbidden, set())
+
+    def test_the_alarm_glue_stamps_one_sentinel_per_episode_and_resets(self) -> None:
+        """stall_alarm returns the loud block and appends ONE sentinel line per
+        episode; a quiet poll returns nothing and re-arms the stamp."""
+        import run_and_watch as rw
+        tmp = tempfile.mkdtemp(prefix="stall-glue-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        ledger = os.path.join(tmp, "metrics.jsonl")
+        with open(ledger, "w") as fh:
+            fh.write('{"completedAt":"2026-08-28T09:01:54.360+00:00","status":200}\n')
+        old_ledger, old_stamped = rw.LEDGER, rw._STALL_STAMPED
+        rw.LEDGER, rw._STALL_STAMPED = ledger, False
+        try:
+            fire_at = time.time() + cw.STALL_ALARM_SECONDS + 120
+            lines = rw.stall_alarm(None, tmp, now=fire_at)
+            self.assertTrue(lines, "past the threshold the alarm block is returned")
+            self.assertTrue(any("STALL ALARM" in ln for ln in lines))
+            sentinel = os.path.join(tmp, cw.STALL_SENTINEL_NAME)
+            self.assertTrue(os.path.isfile(sentinel))
+            again = rw.stall_alarm(None, tmp, now=fire_at + 20)
+            self.assertTrue(again, "the alarm keeps shouting on every poll")
+            with open(sentinel) as fh:
+                self.assertEqual(len(fh.read().splitlines()), 1,
+                                 "one episode appends one line, not one per poll")
+            quiet = rw.stall_alarm(None, tmp, now=time.time())
+            self.assertEqual(quiet, [], "a quiet poll renders nothing")
+            self.assertFalse(rw._STALL_STAMPED, "and re-arms the sentinel for the next episode")
+        finally:
+            rw.LEDGER, rw._STALL_STAMPED = old_ledger, old_stamped
