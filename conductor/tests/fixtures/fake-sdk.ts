@@ -47,9 +47,24 @@ export interface TextPart {
   text: string;
 }
 
+// A non-text part, as a provider failure leaves one: the observed timed-out
+// message carries a reasoning part and NO text part at all.
+export interface ReasoningPart {
+  type: "reasoning";
+  text: string;
+}
+
 export interface AssistantMessage {
-  info: { sessionID?: string; finish?: string; modelID?: string; providerID?: string };
-  parts: TextPart[];
+  info: {
+    sessionID?: string;
+    finish?: string;
+    modelID?: string;
+    providerID?: string;
+    // The SDK's AssistantMessage.error: a generation the provider started and
+    // abandoned reports here, inside a 200 envelope, not on the envelope.
+    error?: unknown;
+  };
+  parts: Array<TextPart | ReasoningPart>;
 }
 
 export interface CreateOptions {
@@ -125,6 +140,11 @@ export interface PromptRecord {
 export type PromptReply =
   | { kind: "reply"; text: string } // resolve now with this assistant text
   | { kind: "error"; error: unknown } // resolve now with an SDK error envelope
+  // resolve now with a 200 whose MESSAGE carries the error (info.error), a
+  // reasoning part and no text part — the observed provider-timeout shape.
+  // `text` adds a text part beside the error, for pinning that a reply which
+  // both errored and delivered a valid receipt is honoured as a receipt.
+  | { kind: "message-error"; error: unknown; text?: string }
   | { kind: "pending" } // park; the test releases it later
   | { kind: "hang" }; // never resolves (watchdog fodder)
 
@@ -241,6 +261,21 @@ function assistantEnvelope(sessionID: string, text: string): SdkEnvelope<Assista
   };
 }
 
+// The observed provider-failure envelope (epoch 22, opencode.db, two rows byte
+// for byte): HTTP 200, the error on the assistant message itself, a reasoning
+// part and NO text part — so extractReplyText composes "".
+function messageErrorEnvelope(
+  sessionID: string,
+  error: unknown,
+  text?: string,
+): SdkEnvelope<AssistantMessage> {
+  const parts: Array<TextPart | ReasoningPart> = [
+    { type: "reasoning", text: "abandoned mid-thought" },
+  ];
+  if (text !== undefined) parts.push({ type: "text", text });
+  return { data: { info: { sessionID, error }, parts } };
+}
+
 export function makeFakeSdk(opts: { registry: RegistryLike; idPrefix?: string }): FakeSdk {
   const { registry } = opts;
   const idPrefix = opts.idPrefix ?? "ses_fake_";
@@ -319,6 +354,9 @@ export function makeFakeSdk(opts: { registry: RegistryLike; idPrefix?: string })
         if (reply.kind === "error") {
           return Promise.resolve({ error: reply.error });
         }
+        if (reply.kind === "message-error") {
+          return Promise.resolve(messageErrorEnvelope(sessionID, reply.error, reply.text));
+        }
         if (reply.kind === "hang") {
           // A promise that never settles — the engine's watchdog must abort it.
           return new Promise<SdkEnvelope<AssistantMessage>>(() => {});
@@ -333,6 +371,8 @@ export function makeFakeSdk(opts: { registry: RegistryLike; idPrefix?: string })
                 resolvePromise(assistantEnvelope(sessionID, settleReply.text));
               } else if (settleReply.kind === "error") {
                 resolvePromise({ error: settleReply.error });
+              } else if (settleReply.kind === "message-error") {
+                resolvePromise(messageErrorEnvelope(sessionID, settleReply.error, settleReply.text));
               }
               // "pending"/"hang" as a settle instruction is a no-op (stays parked).
             },

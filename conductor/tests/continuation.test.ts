@@ -2463,6 +2463,89 @@ test("[10.1-plugin-event-hook-routes] the plugin factory's hooks gain an `event`
 // [10.1-event-hook-failsoft]
 // ===========================================================================
 
+// ===========================================================================
+// [permission-shape-unhandled]
+// ===========================================================================
+
+test("[permission-shape-unhandled] a permission.asked payload the router cannot act on leaves a warn record instead of vanishing", async () => {
+  // The wire shape was verified once, for an `edit` ask; a permission arriving
+  // under any other payload shape used to bail with NO record, which is how the
+  // reject-and-convert design sat dead across two full campaign runs — zero
+  // permission-bearing journal records in either — while a `question` call held
+  // its session 78.7 minutes. The handler still cannot act on a shape it does
+  // not understand; the journal must say one arrived, and name its keys so the
+  // next reader can see WHICH shape the wire actually speaks.
+  const root = scratchRepo();
+  const config = makeConfig();
+  const journal = makeJournal();
+  const store = openStore(root, journal.sink, config);
+  const runId = createRunFor(store);
+  seedOneItemExecuting(store, runId);
+
+  const registry = makeRegistry([
+    [ORCH, { role: "orchestrator" }],
+    [SUB, { role: "testWriter", itemId: "I1", tree: root }],
+  ]);
+  const wiring = makeWiring(registry);
+
+  const fresh = makeJournal();
+  await handlePluginEvent({
+    // The v2-flavoured payload: `action` where the v1 shape has `permission`.
+    event: {
+      type: "permission.asked",
+      properties: { id: "per_v2_shape", sessionID: SUB, action: "question", resources: ["*"] },
+    },
+    store,
+    state: createContinuationState(),
+    registry,
+    client: wiring.client,
+    config,
+    journal: fresh.sink,
+    stateHome: freshStateHome(),
+    workspaceKey: "wk",
+    now: makeClock().now,
+  });
+  await turns();
+
+  assert.equal(wiring.replies.length, 0, "no reply can be composed from a shape the router cannot read");
+  const unhandled = fresh.records.filter((r) => r.event === "permission.unhandled");
+  assert.equal(unhandled.length, 1, "the bail leaves exactly one record");
+  assert.equal(unhandled[0].level, "warn");
+  assert.equal(unhandled[0].component, "state");
+  assert.equal(
+    isKnownEvent(unhandled[0].component, unhandled[0].event),
+    true,
+    "permission.unhandled must be in the closed §7.4 vocabulary (core/journal-events.ts)",
+  );
+  const data = unhandled[0].data as Record<string, unknown>;
+  assert.deepEqual(data.propertyKeys, ["action", "id", "resources", "sessionID"], "the record names the keys the payload DID carry");
+  assert.equal(data.hasPermission, false, "and which expected field was missing");
+
+  // Control: the verified v1 shape still routes to the ask gate, not the bail.
+  const control = makeJournal();
+  await handlePluginEvent({
+    event: {
+      type: "permission.asked",
+      properties: { id: "per_v1_shape", sessionID: SUB, permission: "edit", metadata: { filePath: `${root}/src/a.ts` } },
+    },
+    store,
+    state: createContinuationState(),
+    registry,
+    client: wiring.client,
+    config,
+    journal: control.sink,
+    stateHome: freshStateHome(),
+    workspaceKey: "wk",
+    now: makeClock().now,
+  });
+  await turns();
+  assert.equal(
+    control.records.filter((r) => r.event === "permission.unhandled").length,
+    0,
+    "a payload the router CAN act on never reaches the bail",
+  );
+});
+
 test("[10.1-event-hook-failsoft] G5 fail-soft: a throw from inside either handler is CAUGHT by the event router, journaled once at level 'error' under a name the closed §7.4 vocabulary accepts, and NOT propagated — the returned promise resolves", async () => {
   const root = scratchRepo();
   const config = makeConfig();

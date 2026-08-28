@@ -520,9 +520,10 @@ guarded call is denied with a reason that says so, a harmless read is allowed.
 Two more gates do not live here. The phase-order gate runs at one choke point ahead of every
 `conductor_*` handler, which asks `core/tool-legality.ts` who the caller is and `legalTools` where
 the run stands before the handler does anything. The ask-gate runs on the `permission.asked` bus
-event, on top of the static per-agent `question: "ask"` permissions in the config fragment; its
-default is deny, and only an `edit` permission backed by an active inline claim, or a `question`
-permission, is adjudicated at all.
+event; its default is deny, and only an `edit` permission backed by an active inline claim is
+adjudicated at all. The `question` tool never reaches it: the fragment removes it from every
+agent's offered set (`tools.question: false`) and the gate refuses the tool itself, because a
+headless run has no operator to answer an ask (register D50).
 
 ## State and ledgers
 

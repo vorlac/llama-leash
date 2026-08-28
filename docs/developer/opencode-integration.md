@@ -47,7 +47,7 @@ entirely (plan §0.2):
 | `tool.execute.before` — throw to deny any tool call                                                         | Git policy, edit-scope gate, freeze gate, phase-order gate                                                                                           |
 | SDK `session.create()` + `session.prompt()`                                                                 | Programmatic parallel sub-sessions with structured results — fan-out does not depend on the model emitting parallel task calls                       |
 | `experimental.chat.system.transform`                                                                        | Live harness state — run phase, active item, the recommended next tool call — injected into EVERY request, re-stated every turn and never remembered |
-| `permission.asked` bus event + HTTP adjudication + per-agent `question`/`edit` permissions + `session.idle` | A real ask-gate, and continuation by re-prompting on idle                                                                                            |
+| `permission.asked` bus event + HTTP adjudication + per-agent `edit` permissions + `session.idle` | A real ask-gate, and continuation by re-prompting on idle                                                                                            |
 
 Two things it takes away:
 
@@ -275,15 +275,22 @@ into the session config — deep merge, conductor keys win, with `${LLAMA_HARNES
 substituted for this repository's absolute path at generation time. It contributes the
 `plugin` array entry and seven agent definitions.
 
-| Agent                    | Mode       | Permissions                                                                         | Tools             |
-| ------------------------ | ---------- | ----------------------------------------------------------------------------------- | ----------------- |
-| `conductor-orchestrator` | `primary`  | `edit: "ask"`; `bash: {"*": "allow", "git commit *": "deny", "git push *": "deny"}` | `{"task": false}` |
-| `conductor-implementer`  | `subagent` | `question: "ask"`                                                                   | `{"task": false}` |
-| `conductor-test-writer`  | `subagent` | `question: "ask"`                                                                   | `{"task": false}` |
-| `conductor-reviewer`     | `subagent` | `question: "ask"`, `edit: "deny"`                                                   | `{"task": false}` |
-| `conductor-skeptic`      | `subagent` | `question: "ask"`, `edit: "deny"`                                                   | `{"task": false}` |
-| `conductor-planner`      | `subagent` | `question: "ask"`, `edit: "deny"`                                                   | `{"task": false}` |
-| `conductor-mechanical`   | `subagent` | `question: "ask"`, `edit: "deny"`                                                   | `{"task": false}` |
+| Agent                    | Mode       | Permissions                                                                         | Tools                                |
+| ------------------------ | ---------- | ----------------------------------------------------------------------------------- | ------------------------------------ |
+| `conductor-orchestrator` | `primary`  | `edit: "ask"`; `bash: {"*": "allow", "git commit *": "deny", "git push *": "deny"}` | `{"task": false, "question": false}` |
+| `conductor-implementer`  | `subagent` | —                                                                                   | `{"task": false, "question": false}` |
+| `conductor-test-writer`  | `subagent` | —                                                                                   | `{"task": false, "question": false}` |
+| `conductor-reviewer`     | `subagent` | `edit: "deny"`                                                                      | `{"task": false, "question": false}` |
+| `conductor-skeptic`      | `subagent` | `edit: "deny"`                                                                      | `{"task": false, "question": false}` |
+| `conductor-planner`      | `subagent` | `edit: "deny"`                                                                      | `{"task": false, "question": false}` |
+| `conductor-mechanical`   | `subagent` | `edit: "deny"`                                                                      | `{"task": false, "question": false}` |
+
+The `question` tool is removed from every agent's offered set rather than granted as an ask.
+opencode offers `question` to its app/cli/desktop clients — headless `opencode run`, which every
+benchmark cell uses, is the cli client — and an ask in a headless run is a prompt no one can
+answer: the epoch-22 cell sat 78.7 minutes on one (register D50). `tools.question: false` both
+omits the tool from the offered set and emits a `question * -> deny` rule, and the gate refuses
+the tool itself as the latent-surface pin.
 
 Four things about that table:
 

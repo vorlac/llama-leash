@@ -167,6 +167,14 @@ export const EVENTS: Record<Component, readonly string[]> = {
     // trust (§7.4).
     "run.resumed",
     "hook.failed",
+    // A permission event arrived whose payload does not match the shape the
+    // event router can act on. Widened rather than borrowed: hook.failed
+    // describes a handler that RAN and threw, and this describes one that was
+    // never reached — the distinction is the whole finding, because a
+    // shape-mismatch bail with no record is how the permission handler sat dead
+    // across two full campaign runs while a question call held a session 78.7
+    // minutes (§7.4).
+    "permission.unhandled",
     "config.updated",
   ],
 };

@@ -1765,7 +1765,29 @@ export async function handlePluginEvent(input: PluginEventInput): Promise<void> 
     if (event.type === "permission.asked") {
       const id = stringProp(event.properties, "id");
       const permission = stringProp(event.properties, "permission");
-      if (sessionID === null || id === null || permission === null) return;
+      if (sessionID === null || id === null || permission === null) {
+        // A payload this router cannot act on must still leave a record. The
+        // wire shape was verified once (2026-08-12) for an `edit` ask only;
+        // a permission that arrives under a different shape would otherwise
+        // vanish, and the reject-and-convert design downstream would be dead
+        // with nothing in any journal to say so — measured: zero
+        // permission-bearing records across two full runs while a question
+        // call held its session 78.7 minutes.
+        journal.log(
+          "warn",
+          "state",
+          "permission.unhandled",
+          {
+            type: event.type,
+            propertyKeys: Object.keys(event.properties ?? {}).sort(),
+            hasSessionID: sessionID !== null,
+            hasId: id !== null,
+            hasPermission: permission !== null,
+          },
+          { sessionID: sessionID ?? undefined },
+        );
+        return;
+      }
       const properties = event.properties ?? {};
       const patterns = properties.patterns;
       const metadata = properties.metadata;

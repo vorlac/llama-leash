@@ -713,6 +713,49 @@ test("[5.3-patch-tools-denied] control: the ordinary edit/write tools are untouc
 });
 
 // ===========================================================================
+// The question tool. Latent-surface pin, not a check of shipped behaviour: the
+// fragment strips `question` from every agent's offered set, so a conductor
+// session is never shown the tool and this path cannot fire in production. The
+// pin exists for the config regression — opencode offers `question` to its
+// app/cli/desktop clients (`opencode run` is the cli client every benchmark
+// cell uses), so a fragment edit or an opencode bump that re-opens the offered
+// set meets this refusal instead of the measured alternative: a headless
+// session parked 78.7 minutes on an answer that cannot arrive (epoch 22, run
+// r-20260828-c828, journal seq 140 of 140).
+// ===========================================================================
+
+test("[question-tool-denied] the question tool is DENIED outright — a headless run has no operator to answer", () => {
+  // The observed payload shape: a degenerate end-of-turn call from a session
+  // whose work was already complete.
+  const refusal = expectThrow(
+    () =>
+      gateBeforeToolCall(
+        hookInput({
+          toolName: "question",
+          args: { header: "noop", question: "Placeholder — returning ImplementerResult directly." },
+          fileScope: ["src/**"],
+        }),
+      ),
+    "a question call from a dispatched sub-session",
+  );
+  assert.match(refusal.message, /question/, "the refusal names the tool the model reached for");
+  assert.match(refusal.message, /headless|no operator/, "the refusal states WHY: nobody can answer");
+  // The refusal must steer a finished session toward replying, never toward a
+  // blocked disposition: the observed stall came from a session that was DONE,
+  // and inviting NEEDS_CONTEXT would convert a completed item into a stuck one.
+  assert.doesNotMatch(refusal.message, /NEEDS_CONTEXT|conductor_surface/);
+  assert.match(refusal.message, /reply/, "the refusal names the way forward: reply with the result");
+});
+
+test("[question-tool-denied] question still classifies as a guarded (write-class) call, so a gate crash on it fails CLOSED", () => {
+  assert.equal(
+    classifyTool("question"),
+    "write",
+    "a call the gate refuses must never have been classified as a harmless read on the way in",
+  );
+});
+
+// ===========================================================================
 // Tasks 21.3 / 21.4 through the REAL gate hook, not the pure decision.
 //
 // The pure rows live in builtin-surface.test.ts. These exist because the thing

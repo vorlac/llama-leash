@@ -351,9 +351,12 @@ for nothing, which is exactly the cost the scheduler exists to avoid.
 
 ## The ask-gate
 
-Sub-sessions are not allowed to stall waiting for a human. Each conductor sub-agent
-definition carries `question: "ask"` in its permission block, and the plugin subscribes to
-opencode's `permission.asked` bus event and adjudicates it over HTTP
+Sub-sessions are not allowed to stall waiting for a human. The `question` tool is removed
+from every conductor agent's offered set outright (`tools.question: false` in the fragment,
+with a gate refusal behind it): a conductor run is headless, so an "ask" is a prompt no one
+can answer, and the one time the tool was reachable a session sat 78.7 minutes on it
+(register D50). For the permissions that remain — an `edit` ask, chiefly — the plugin
+subscribes to opencode's `permission.asked` bus event and adjudicates it over HTTP
 (`POST /session/{id}/permissions/{permissionID}` with a `{response}` body).
 
 A sub-session's ask is rejected at the wire, and the fan-out engine converts the resulting

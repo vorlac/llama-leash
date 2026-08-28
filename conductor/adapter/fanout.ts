@@ -121,6 +121,13 @@ export interface FanoutClient {
 // retries"), so at most three prompt() calls per session.
 const MAX_ATTEMPTS = 3;
 
+// A provider error is retried at most once (two prompt() calls). Measured across
+// two campaign journals: six of eight lenses that hit the provider's 1,800 s
+// generation timeout returned a valid receipt on the very next attempt, and none
+// recovered later than that — a further retry buys only another 30-minute
+// timeout window against a 480-minute cell budget.
+const PROVIDER_ERROR_MAX_ATTEMPTS = 2;
+
 interface Entry {
   job: FanoutJob;
   index: number;
@@ -161,6 +168,33 @@ function describeError(error: unknown): string {
     }
   }
   return String(error);
+}
+
+// A provider-reported failure rides INSIDE a 200 envelope, on the assistant
+// message itself: `data.info.error`, the SDK's `AssistantMessage.error` field.
+// The distinction from `reply.error` matters twice over. An envelope error is a
+// call that did not happen; a message error is a generation the provider started
+// and abandoned — observed as `{"name":"UnknownError","data":{"message":"The
+// operation timed out."}}` riding with a reasoning part and NO text part, so
+// extractReplyText returns "" and the receipt parse fails on empty input.
+// Blaming that on the model's JSON misreports a transport failure as a schema
+// failure; naming it lets the journal say what happened. Read AFTER the receipt
+// check, so a reply that both errored and delivered a valid receipt is honoured.
+function messageError(
+  reply: FanoutEnvelope<{ info?: unknown; parts?: unknown }>,
+): string | undefined {
+  const info = reply.data?.info;
+  if (info === null || typeof info !== "object") return undefined;
+  const error = (info as { error?: unknown }).error;
+  if (error === undefined || error === null) return undefined;
+  const name = (error as { name?: unknown }).name;
+  const data = (error as { data?: unknown }).data;
+  const message =
+    data !== null && typeof data === "object"
+      ? (data as { message?: unknown }).message
+      : undefined;
+  if (typeof name === "string" && typeof message === "string") return `${name}: ${message}`;
+  return describeError(error);
 }
 
 // Compose the prompt reply's text parts (the prompt-shaped payload) into one string.
@@ -676,8 +710,59 @@ export function createFanout(
               finish({ sessionID, value: receipt.value });
               return;
             }
+            // The receipt did not validate. Before blaming the reply, ask whether
+            // a reply was delivered at all: a provider error on the message means
+            // the generation was abandoned upstream, so there is no output to
+            // correct — the re-prompt is the ORIGINAL brief, because schema
+            // feedback about an undelivered reply is false feedback, and growing
+            // the prompt that just timed out raises the odds it times out again.
+            const providerError = messageError(reply);
+            if (providerError !== undefined) {
+              if (attempt < PROVIDER_ERROR_MAX_ATTEMPTS) {
+                journal.log(
+                  "info",
+                  "fanout",
+                  "subsession.retry",
+                  {
+                    attempt,
+                    reason: "provider-error",
+                    errors: [providerError],
+                    ...transcriptFields("response", replyText),
+                  },
+                  corr(),
+                );
+                promptText = briefWithShape(job);
+                continue;
+              }
+              journal.log(
+                "info",
+                "fanout",
+                "subsession.complete",
+                {
+                  ok: false,
+                  reason: "provider-error",
+                  errors: [providerError],
+                  ...transcriptFields("response", replyText),
+                },
+                corr(),
+              );
+              finish({
+                sessionID,
+                error: { kind: "env", reason: `provider error: ${providerError}` },
+              });
+              return;
+            }
             if (attempt < MAX_ATTEMPTS) {
-              journal.log("info", "fanout", "subsession.retry", { attempt, errors: receipt.errors }, corr());
+              // The refused text rides on the retry record too: settling whether a
+              // "schema-invalid" was a real malformed reply or a misread transport
+              // failure must not require a database read.
+              journal.log(
+                "info",
+                "fanout",
+                "subsession.retry",
+                { attempt, errors: receipt.errors, ...transcriptFields("response", replyText) },
+                corr(),
+              );
               promptText = appendErrors(briefWithShape(job), job.schemaName, receipt.errors);
               continue;
             }

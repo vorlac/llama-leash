@@ -307,6 +307,18 @@ const HOOK_NODES: readonly AtlasNode[] = [
       "§3.7 — a local model that stops mid-run is the normal case, not the exception. Something has to " +
       "notice and re-prompt, or every run ends by the operator giving up.",
     source: ["conductor/plugin/index.ts:1", "conductor/adapter/continuation.ts:1"],
+    logs: [
+      {
+        component: "state",
+        event: "permission.unhandled",
+        level: "warn",
+        means:
+          "A permission.asked event arrived whose payload the router cannot act on — the expected " +
+          "`permission` string is absent, so no handler runs. The record names the keys the payload DID " +
+          "carry. Without it a shape mismatch is invisible, which is how the permission handler sat dead " +
+          "across two full runs while a `question` call held a session 78.7 minutes.",
+      },
+    ],
   },
 ];
 

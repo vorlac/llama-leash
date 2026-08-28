@@ -39,6 +39,11 @@ import { readFileSync } from "node:fs";
 // class by NAME, because `ls` is R0 and `curl` is R3, so it is classified from
 // its command text instead. Every OTHER offered name must carry one.
 const OFFERED = ["edit", "glob", "grep", "read", "skill", "task", "todowrite", "webfetch", "write"];
+// `question` is client-gated rather than registry-only: opencode offers it to its
+// app/cli/desktop clients — including headless `opencode run`, which every
+// benchmark cell uses — and withholds it from the wire-contract fixture client
+// (wire-notes 20.1). It sits in this list because the coverage requirement is the
+// same either way: a class must exist before the tool can reach a session.
 const REGISTRY_ONLY = ["question", "invalid", "websearch", "apply_patch", "patch"];
 
 const surface = (over: Partial<Parameters<typeof decideBuiltinSurface>[0]> = {}) =>

@@ -279,9 +279,10 @@ never weights.
 
 **The agent definition.** [`conductor/opencode-fragment.json`](../../conductor/opencode-fragment.json)
 gets an agent entry: `mode` (`primary` or `subagent`), a one-line `description`, a `permission`
-block (`question: "ask"`, plus `edit: "deny"` for read-only roles), and — non-negotiable —
-`"tools": { "task": false }`, the per-agent spawn denial. `fragment.test.ts` pins this file's
-contents, so the test is where you start.
+block (`edit: "deny"` for read-only roles), and — non-negotiable —
+`"tools": { "task": false, "question": false }`: the per-agent spawn denial, and the removal of
+the operator-question tool a headless run can never answer (register D50). `fragment.test.ts`
+pins this file's contents, so the test is where you start.
 
 **The registry entry.** A session is `{ role, itemId?, tree? }`. The fan-out engine writes the
 entry *before* the sub-session's first prompt (registry-before-prompt); the `chat.message` hook

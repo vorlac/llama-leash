@@ -129,8 +129,19 @@ of the previous section and answer the questions Phases 21 and 22B are gated on.
 - WIRE_CONTRACT_VERIFIED: 2026-08-20 the FULL set of tool names offered to the model at
   1.18.15, asserted by `deepEqual` rather than by membership, is exactly:
   `bash, edit, glob, grep, read, skill, task, todowrite, webfetch, write` plus every
-  plugin-registered tool (the fixture's `conductor_probe`). `question`, `invalid`,
-  `websearch` and `apply_patch` remain registry-only and are NOT offered.
+  plugin-registered tool (the fixture's `conductor_probe`). `invalid`, `websearch`
+  and `apply_patch` remain registry-only and are NOT offered. `question` is
+  **client-gated, not registry-only**: 1.18.15 includes it in the builtin list
+  exactly when the client is `app`, `cli` or `desktop`, or
+  `OPENCODE_ENABLE_QUESTION_TOOL` is set (read from the binary:
+  `ro=["app","cli","desktop"].includes(i.client)||i.enableQuestionTool`, then
+  `...ro?[_.question]:[]`). The fixture client here is none of those, so the
+  deepEqual above is correct for THIS test — but `opencode run`, the cli client
+  every benchmark cell uses, DOES offer it. Measured in epoch 22 (run
+  r-20260828-c828): a dispatched test-writer called `question` and its session
+  blocked 78.7 minutes, because headless `opencode run` has no answer channel.
+  The fragment closes the surface with `tools.question: false` on every agent,
+  and `adapter/tools.ts` refuses the tool at the gate as the latent-surface pin.
   The pin lives at `OFFERED_BUILTIN_TOOLS` / `OFFERED_TOOL_SET` in the test; a tool
   appearing or disappearing on an opencode bump is now a red test naming the tool,
   not a silent hole.
@@ -198,7 +209,7 @@ of the previous section and answer the questions Phases 21 and 22B are gated on.
 | `patch` | X | structurally unboundable; refused ahead of every gate |
 | `apply_patch` | X | structurally unboundable; refused ahead of every gate |
 | `task` | S | session-spawning; denied in every session |
-| `question` | — | registry-only; opencode's own ask surface, not a conductor lane |
+| `question` | R0 | client-gated: offered to app/cli/desktop clients (so to every benchmark cell); reaches nothing, but blocks a headless session forever, so the gate refuses the tool itself |
 | `invalid` | — | opencode's redirect target for an unavailable tool |
 
 ### 20.5 Banner delivery seam

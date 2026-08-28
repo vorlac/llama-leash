@@ -1,7 +1,12 @@
 // Task 0.3 (assertions 0.3-fragment, 0.3-fragment-test): pin the content of
-// conductor/opencode-fragment.json to the plan's §5.3 JSON block (plan lines
-// 1754-1780), which the implementer copies verbatim. The file is located
-// relative to this test file (never process.cwd(), never an absolute path).
+// conductor/opencode-fragment.json. The pinned shape began as the plan's §5.3
+// JSON block (plan lines 1754-1780) and departs from it in one recorded way:
+// the plan grants `question: "ask"` so the plugin can refuse the ask, and D50
+// (docs/build/artifacts/14.2-arm-campaign.md) measured that design dead — the
+// refusal handler never fired across two full runs while a question call held
+// a session 78.7 minutes — so the tool is removed from the offered set
+// instead. The file is located relative to this test file (never
+// process.cwd(), never an absolute path).
 // Note: "${LLAMA_HARNESS_ROOT}" below is the literal substitution token that
 // the fragment ships with (serve.py substitutes it at generation time), not a
 // template interpolation.
@@ -142,17 +147,41 @@ test("fragment: no string anywhere in the fragment names a doctrine pack, so no 
   assert.ok(!/\b(core|decompose|plan|tdd|review|test-vet|skeptic|debug|receive-review)\.md\b/.test(blob));
 });
 
-test("fragment: each of the six subagent definitions has mode subagent and question ask", () => {
+test("fragment: each of the six subagent definitions has mode subagent", () => {
   const fragment = readFragment();
   for (const name of SUBAGENT_NAMES) {
     const entry = agentEntry(fragment, name);
     assert.equal(entry["mode"], "subagent", `fragment.agent["${name}"].mode`);
-    const permission = permissionOf(entry, name);
-    assert.equal(
-      permission["question"],
-      "ask",
-      `fragment.agent["${name}"].permission.question`,
-    );
+  }
+});
+
+// The question tool is removed from every agent's offered set, and no permission
+// row re-opens it. An earlier fragment granted `question: "ask"` so the plugin's
+// permission handler could see and refuse the call — but across two full campaign
+// runs that handler journaled zero permission events while a test-writer's
+// `question` call held its session 78.7 minutes at zero progress (epoch 22, run
+// r-20260828-c828, journal seq 140): in a headless cell the "ask" is a prompt no
+// one can answer. `tools.<id>: false` is the measured two-layer closure
+// (wire-notes 20.2): the tool is omitted from the offered set AND a
+// `question * -> deny` rule is emitted, so the closure survives an opencode bump
+// that drops the base ruleset's own `question * -> deny`. The gate refusal in
+// adapter/tools.ts is the latent-surface pin behind this config.
+test("fragment: every agent removes the question tool from its offered set, and no permission re-opens it", () => {
+  const fragment = readFragment();
+  for (const name of ALL_AGENT_NAMES) {
+    const entry = agentEntry(fragment, name);
+    const tools = entry["tools"];
+    assertIsRecord(tools, `fragment.agent["${name}"].tools`);
+    assert.equal(tools["question"], false, `fragment.agent["${name}"].tools.question`);
+    const permission = entry["permission"];
+    if (permission !== undefined) {
+      assertIsRecord(permission, `fragment.agent["${name}"].permission`);
+      assert.ok(
+        !("question" in permission),
+        `fragment.agent["${name}"].permission must not carry a question rule — ` +
+          "an ask blocks a headless session forever and an allow re-opens the tool",
+      );
+    }
   }
 });
 

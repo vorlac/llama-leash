@@ -53,9 +53,15 @@ export const BUILTIN_SIDE_EFFECT: Readonly<Record<string, SideEffectClass>> = {
   todowrite: "R0",
   skill: "R0",
   // opencode's own operator-facing surfaces. Neither reaches the tree or the
-  // network; `invalid` is where opencode redirects a call to a tool the agent may
-  // not use, so refusing it would replace a clear upstream message with a
-  // conductor refusal for a call that already did nothing.
+  // network, which is all this table judges. `question` is client-gated, not
+  // registry-only: opencode offers it to app/cli/desktop clients, so headless
+  // `opencode run` — every benchmark cell — puts it in front of the model, where
+  // it blocks the session on an operator who does not exist. R0 stays because
+  // reach is this table's question; the refusal lives in adapter/tools.ts, which
+  // denies the tool itself ahead of every other gate. `invalid` is where opencode
+  // redirects a call to a tool the agent may not use, so refusing it would
+  // replace a clear upstream message with a conductor refusal for a call that
+  // already did nothing.
   question: "R0",
   invalid: "R0",
   // Network reads. Allowed by the client with no narrowing in any agent kind;

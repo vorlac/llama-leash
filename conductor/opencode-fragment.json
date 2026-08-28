@@ -13,43 +13,41 @@
         }
       },
       "prompt": "You are the conductor orchestrator. The conductor doctrine and the live run state are appended to this system prompt on every request; follow them.",
-      "tools": { "task": false }
+      "tools": { "task": false, "question": false }
     },
     "conductor-implementer": {
       "mode": "subagent",
       "description": "Implements one item",
-      "permission": { "question": "ask" },
-      "tools": { "task": false }
+      "tools": { "task": false, "question": false }
     },
     "conductor-test-writer": {
       "mode": "subagent",
       "description": "Writes one item's failing test",
-      "permission": { "question": "ask" },
-      "tools": { "task": false }
+      "tools": { "task": false, "question": false }
     },
     "conductor-reviewer": {
       "mode": "subagent",
       "description": "Reviews with one lens",
-      "permission": { "question": "ask", "edit": "deny" },
-      "tools": { "task": false }
+      "permission": { "edit": "deny" },
+      "tools": { "task": false, "question": false }
     },
     "conductor-skeptic": {
       "mode": "subagent",
       "description": "Refutes one finding",
-      "permission": { "question": "ask", "edit": "deny" },
-      "tools": { "task": false }
+      "permission": { "edit": "deny" },
+      "tools": { "task": false, "question": false }
     },
     "conductor-planner": {
       "mode": "subagent",
       "description": "Decomposes and plans",
-      "permission": { "question": "ask", "edit": "deny" },
-      "tools": { "task": false }
+      "permission": { "edit": "deny" },
+      "tools": { "task": false, "question": false }
     },
     "conductor-mechanical": {
       "mode": "subagent",
       "description": "Small schema-bound tasks",
-      "permission": { "question": "ask", "edit": "deny" },
-      "tools": { "task": false }
+      "permission": { "edit": "deny" },
+      "tools": { "task": false, "question": false }
     }
   }
 }

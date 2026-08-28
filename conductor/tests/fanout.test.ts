@@ -660,6 +660,109 @@ test("[7.1-retry] persistent schema-invalidity yields an env-failed result after
 });
 
 // ---------------------------------------------------------------------------
+// provider-error — a failure the provider reports ON the message (info.error),
+// inside a 200 envelope, with no text part. Measured in epochs 21-22: eleven
+// ledger rows with status 200, upstreamMs ~1,800,000 and every token field
+// null, 1:1 with eleven "JSON Parse error: Unexpected EOF" events — the
+// provider abandoned the generation, extractReplyText composed "", and the
+// engine journaled "schema-invalid" against a reply that was never delivered.
+// Six of the eight lens first-attempts that hit this recovered on the very
+// next attempt, so the retry stays; what goes is the misdiagnosis and the
+// false schema feedback on the re-prompt.
+// ---------------------------------------------------------------------------
+
+const TIMED_OUT = { name: "UnknownError", data: { message: "The operation timed out." } };
+
+test("[provider-error] a provider-reported failure re-prompts with the ORIGINAL brief and is journaled as provider-error, not schema-invalid", async () => {
+  const registry = makeRegistry();
+  const sdk = makeFakeSdk({ registry });
+  const { journal, records } = makeRecordingJournal();
+  const fanout: Fanout = createFanout(sdk.client, makeConfig(), journal, registry, makeFakeTreeState());
+
+  sdk.setResponder((req): PromptReply =>
+    req.attempt === 1 ? { kind: "message-error", error: TIMED_OUT } : { kind: "reply", text: VALID },
+  );
+
+  const result = await fanout.dispatch(readJob({ itemId: "i1", prompt: "PRODUCE_PROBE" }));
+  const sid = sdk.creates[0];
+
+  assert.equal(sdk.promptsFor(sid).length, 2, "one retry after the provider failure");
+  const retryText = sdk.promptsFor(sid)[1].text;
+  assert.ok(retryText.includes("PRODUCE_PROBE"), "the retry keeps the original brief");
+  assert.ok(
+    !retryText.includes("did not satisfy"),
+    "no schema feedback rides the retry: the failed reply was never delivered, so there is nothing to correct",
+  );
+
+  const retry = records.find((r) => r.event === "subsession.retry");
+  assert.ok(retry !== undefined, "the retry is journaled");
+  const data = retry.data as Record<string, unknown>;
+  assert.equal(data.reason, "provider-error", "the journal names the failure as the provider's");
+  assert.ok(
+    JSON.stringify(data.errors).includes("The operation timed out."),
+    "the provider's own message is carried",
+  );
+  assert.ok("response" in data, "the (empty) response text rides the retry record");
+
+  assert.deepEqual(result.value, VALID_VALUE, "the retry succeeds and yields the validated value");
+  assert.ok(
+    !records.some((r) => (r.data as Record<string, unknown> | undefined)?.reason === "schema-invalid"),
+    "nothing about this exchange is attributed to the model's JSON",
+  );
+  assertKnownFanoutEvents(records);
+});
+
+test("[provider-error] persistent provider failure finishes env-failed as provider-error after exactly two attempts", async () => {
+  const registry = makeRegistry();
+  const sdk = makeFakeSdk({ registry });
+  const { journal, records } = makeRecordingJournal();
+  const fanout: Fanout = createFanout(sdk.client, makeConfig(), journal, registry, makeFakeTreeState());
+
+  sdk.setResponder((): PromptReply => ({ kind: "message-error", error: TIMED_OUT }));
+
+  const result = await fanout.dispatch(readJob({ itemId: "i1", prompt: "PRODUCE_PROBE" }));
+  const sid = sdk.creates[0];
+
+  // Two prompt() calls, not three: the measured recoveries all landed on the
+  // second attempt, and each further attempt risks another 30-minute timeout.
+  assert.equal(sdk.promptsFor(sid).length, 2, "provider errors get one retry, then stop");
+  assert.equal(result.value, undefined);
+  assert.ok(result.error !== undefined, "it produces an env-failed error result");
+  const errText = JSON.stringify(result.error);
+  assert.ok(/"env"/.test(errText), "the failure kind is env, not a receipt problem");
+  assert.ok(/provider error/.test(errText), "the error names the provider");
+  assert.ok(/timed out/.test(errText), "the provider's message survives");
+
+  const complete = records.find((r) => r.event === "subsession.complete");
+  assert.equal((complete?.data as Record<string, unknown> | undefined)?.reason, "provider-error");
+  assert.ok(
+    !records.some((r) => (r.data as Record<string, unknown> | undefined)?.reason === "schema-invalid"),
+    "a transport failure is never journaled as the model's schema failure",
+  );
+  assertKnownFanoutEvents(records);
+});
+
+test("[provider-error] a reply that both errored and delivered a valid receipt is honoured as a receipt", async () => {
+  const registry = makeRegistry();
+  const sdk = makeFakeSdk({ registry });
+  const { journal, records } = makeRecordingJournal();
+  const fanout: Fanout = createFanout(sdk.client, makeConfig(), journal, registry, makeFakeTreeState());
+
+  // The error and a valid text part arrive together: the receipt check runs
+  // FIRST, so the value is kept and no retry is spent.
+  sdk.setResponder((): PromptReply => ({ kind: "message-error", error: TIMED_OUT, text: VALID }));
+
+  const result = await fanout.dispatch(readJob({ itemId: "i1", prompt: "PRODUCE_PROBE" }));
+  const sid = sdk.creates[0];
+
+  assert.equal(sdk.promptsFor(sid).length, 1, "a valid receipt spends no retry, whatever info.error says");
+  assert.deepEqual(result.value, VALID_VALUE);
+  assert.equal(result.error, undefined);
+  assert.ok(!records.some((r) => r.event === "subsession.retry"), "no retry was journaled");
+  assertKnownFanoutEvents(records);
+});
+
+// ---------------------------------------------------------------------------
 // 7.1-watchdog — a hung sub-session is aborted via the SDK after the timeout. Uses the
 // node:test mock timers so no real time passes: the fake hangs, the fake clock advances.
 // ---------------------------------------------------------------------------
