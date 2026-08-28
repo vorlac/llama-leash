@@ -116,6 +116,10 @@ interface PluginHooks {
   ) => Promise<void> | void;
   "chat.params"?: (input: ChatParamsInput, output: ChatParamsOutput) => Promise<void> | void;
   "chat.headers"?: (input: ChatParamsInput, output: ChatHeadersOutput) => Promise<void> | void;
+  "tool.execute.after"?: (
+    input: { sessionID: string; tool: string; callID?: string },
+    output: { title?: string; output: string; metadata?: Record<string, unknown> },
+  ) => Promise<void> | void;
 }
 
 // One journal record as adapter/journal.ts writes it into <runDir>/journal.jsonl
@@ -250,7 +254,7 @@ function seedRun(store: StateStore, sessionID: string, runState: RunState, state
   return created.runId;
 }
 
-// The state block the transform hook actually delivers for one session.
+// The stable state anchor the transform hook delivers into the system PREFIX.
 async function deliveredStateBlock(hooks: PluginHooks, sessionID: string): Promise<string> {
   const transform = hookOf(hooks, "experimental.chat.system.transform");
   const output: SystemTransformOutput = { system: [] };
@@ -258,9 +262,36 @@ async function deliveredStateBlock(hooks: PluginHooks, sessionID: string): Promi
   const last = output.system[output.system.length - 1] ?? "";
   assert.ok(
     last.includes(STATE_BLOCK_ANCHOR),
-    "premise: the last append entry is the live state block; got: " + last.slice(0, 200),
+    "premise: the last append entry is the stable state anchor; got: " + last.slice(0, 200),
   );
   return last;
+}
+
+// The VOLATILE state tail as the model actually receives it: appended to a tool
+// result by tool.execute.after, which wire-notes 20.5 measured as the one channel
+// that puts plugin-authored text at the request tail. The tail is where the live
+// values live now — a byte of them in the system prefix re-prefills the whole
+// conversation on a cache this model cannot rewind (rank 2).
+async function deliveredStateTail(
+  hooks: PluginHooks,
+  sessionID: string,
+  tool = "read",
+): Promise<string> {
+  const after = hookOf(hooks, "tool.execute.after");
+  const body = "TOOL-RESULT-BODY";
+  const output = { title: "t", output: body, metadata: {} };
+  await after({ sessionID, tool, callID: "call_1" }, output);
+  // The tail APPENDS: the result body survives whole and the state follows it.
+  // (The §3.8 session banner prefixes the session's FIRST non-conductor result,
+  // which is why the body is not required to be at offset zero.)
+  const at = output.output.indexOf(body);
+  assert.ok(at >= 0, "premise: the tool result body survives intact; got: " + output.output.slice(0, 160));
+  const tail = output.output.slice(at + body.length);
+  assert.ok(
+    tail.includes(STATE_BLOCK_ANCHOR),
+    "premise: the delivered tool result carries the live state tail; got: " + tail.slice(0, 200),
+  );
+  return tail;
 }
 
 // A copy of the shipped doctrine directory with exactly one required pack
@@ -511,14 +542,22 @@ test("[inject-wiring-system-transform] the transform hook appends the role's pac
   const last = delivered[delivered.length - 1] ?? "";
   assert.ok(
     last.includes(STATE_BLOCK_ANCHOR),
-    "the LIVE STATE BLOCK is the last append entry (§6.4), re-stated every request; got: " + last.slice(0, 200),
+    "the STABLE STATE ANCHOR is the last append entry (§6.4); got: " + last.slice(0, 200),
   );
   assert.ok(
-    last.includes("Next action: call conductor_classify."),
-    "the block must name the ONE recommended next tool from the gate's own legality verdict — a " +
+    !last.includes("Next action: call"),
+    "and the anchor carries NO volatile value: a recommendation in the system prefix changes at " +
+      "every FSM boundary, and this model's cache cannot rewind — epoch 22 paid 734 s of prefill " +
+      "for 281 output tokens across three such transitions. Got:\n" + last,
+  );
+
+  const tail = await deliveredStateTail(hooks, sessionID);
+  assert.ok(
+    tail.includes("Next action: call conductor_classify."),
+    "the TAIL must name the ONE recommended next tool from the gate's own legality verdict — a " +
       "freshly created run has not been classified (adapter/chat-message.ts writes a PLACEHOLDER " +
       "classification, and run.classified is the receipt that says the classifier has spoken), so " +
-      "the recommendation is conductor_classify. Got:\n" + last,
+      "the recommendation is conductor_classify. Got:\n" + tail,
   );
 
   // [D26] A block that names an action must not, in the same breath, name a way to
@@ -528,17 +567,17 @@ test("[inject-wiring-system-transform] the transform hook appends the role's pac
   // the 14.2 per-turn capture. The COUNT of other legal tools is honest and stays;
   // the instruction to go and get them does not.
   assert.ok(
-    !last.includes("call conductor_status"),
+    !tail.includes("call conductor_status"),
     "with a next action named, the block must not also instruct the session to call " +
-      "conductor_status: it advances nothing and competes with the action. Got:\n" + last,
+      "conductor_status: it advances nothing and competes with the action. Got:\n" + tail,
   );
   assert.ok(
-    /Other legal tools available now: \d+\./.test(last),
-    "the count of other legal tools is honest and stays — only the invitation goes. Got:\n" + last,
+    /Other legal tools available now: \d+\./.test(tail),
+    "the count of other legal tools is honest and stays — only the invitation goes. Got:\n" + tail,
   );
   assert.ok(
-    last.split("\n").length <= 30,
-    "the live state block is bounded at 30 lines (§6.4); got " + String(last.split("\n").length),
+    tail.split("\n").length <= 30,
+    "the live state tail is bounded at 30 lines (§6.4); got " + String(tail.split("\n").length),
   );
 
   // Re-stated, never remembered (G9): a second request gets the block again.
@@ -578,6 +617,23 @@ test("[inject-wiring-params] the chat.params hook applies the §4.1 per-role tem
     0.4,
     "§4.1 gives the orchestrator temperature 0.4; an untouched 0.99 is the signature of a params " +
       "hook that was composed and never registered (ISSUE-001c)",
+  );
+
+  // Rank 1: the thinking-channel bound rides `options`, which wire-notes:27
+  // measured as landing as a TOP-LEVEL provider-body field. llama-server reads
+  // `reasoning_budget_tokens` off the request body with precedence over its own
+  // server-wide value — which is what keeps this conductor-only, since the flat
+  // arms load no plugin and their bodies are unchanged.
+  assert.equal(
+    output.options["reasoning_budget_tokens"],
+    3072,
+    "the orchestrator's per-request thinking budget must reach the provider body. Options: " +
+      JSON.stringify(output.options),
+  );
+  assert.equal(
+    output.options["reasoning_budget_message"],
+    "Budget spent. Emit the reply now.",
+    "and with the message that forces a reply rather than truncating mid-thought",
   );
 });
 
@@ -695,12 +751,11 @@ test("[inject-wiring-receipt-recommendation] the receipt records the single next
     "a run-level recommendation targets no item, and null is that fact — not an absent key",
   );
 
-  const block = output.system[output.system.length - 1];
   assert.match(
-    block,
+    await deliveredStateTail(hooks, sessionID),
     /Next action: call conductor_classify./,
     "and the recorded name is the one the model was actually told, from the same derivation — a " +
-      "receipt that disagreed with the block would be worse than none",
+      "receipt that disagreed with the delivered tail would be worse than none",
   );
 });
 
@@ -795,11 +850,17 @@ test("[inject-wiring-subsession-role] a REGISTERED sub-session receives ITS role
         "from the orchestrator's own delivery",
     );
     const block = output.system[output.system.length - 1] ?? "";
-    assert.ok(block.includes(STATE_BLOCK_ANCHOR), "the live state block is still the last entry");
+    assert.ok(block.includes(STATE_BLOCK_ANCHOR), "the stable state anchor is still the last entry");
     assert.ok(
-      block.includes("Active item: I1"),
-      "and a sub-session's block reports ITS OWN item (§6.4), which it can only know from the " +
-        "registry entry; got:\n" + block,
+      block.includes("Your assigned item: I1"),
+      "the anchor names the item this session was DISPATCHED for — written once at dispatch, so it " +
+        "is stable for the session's life; got:\n" + block,
+    );
+    const subTail = await deliveredStateTail(hooks, sub);
+    assert.ok(
+      subTail.includes("Active item: I1"),
+      "and the tail reports that item's LIVE state (§6.4), which it can only know from the " +
+        "registry entry; got:\n" + subTail,
     );
 
     // (b) params — the role's own §4.1 temperature.
@@ -879,7 +940,7 @@ test("[inject-wiring-publish-freshness] a repo created mid-process changes the v
 
   const hooks = await startPlugin(root);
 
-  const before = await deliveredStateBlock(hooks, sessionID);
+  const before = await deliveredStateTail(hooks, sessionID);
   assert.ok(
     before.includes("Next action: call conductor_report."),
     "premise: with no repo, §3.9 makes REVIEWED terminal and the run closes via conductor_report; " +
@@ -890,10 +951,10 @@ test("[inject-wiring-publish-freshness] a repo created mid-process changes the v
   // does (adapter/tools.ts calls this same gitio function from the handler).
   assert.equal(initRepo(root), true, "premise: the fixture workspace was not a repo until now");
 
-  const after = await deliveredStateBlock(hooks, sessionID);
+  const after = await deliveredStateTail(hooks, sessionID);
   assert.ok(
     after.includes("Next action: call conductor_publish on I1."),
-    "the state block must re-derive §3.9 publish availability per request, exactly as the stage gate " +
+    "the state tail must re-derive §3.9 publish availability per request, exactly as the stage gate " +
       "does (adapter/tools.ts calls isRepo(store.root) fresh on every stage call). A process-lifetime " +
       "memo makes the block report publishEnabled:false forever after a setup that initialized the " +
       "repo, so the block recommends closing a run the gate is still asking to publish — two answers " +

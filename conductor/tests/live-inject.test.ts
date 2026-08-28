@@ -365,22 +365,28 @@ describe("live injection through a real opencode (GAP-003)", { skip: SKIP }, () 
     );
   });
 
-  it("gap-003-state-block-in-request: the live state block rides the same request with the recommended next tool", () => {
+  it("gap-003-state-block-in-request: the live state anchor rides the request, and it carries NO volatile value — the prefix is the KV cache and this model cannot rewind it", () => {
     const systems = systemMessagesOf(firstChatRequest());
     const block = systems.find((entry) => entry.includes(STATE_BLOCK_ANCHOR));
     assert.ok(
       block !== undefined,
-      "the §6.4 live state block reached nobody: a 32k model's only runtime navigation is this block, " +
-        "and without it the model cannot know which tool is legal unless it calls conductor_status. " +
-        "System messages seen: " + JSON.stringify(systems.map((entry) => entry.slice(0, 80))),
+      "the §6.4 state anchor reached nobody: a 32k model's only runtime navigation is the state " +
+        "delivery, and without it the model cannot know which tool is legal unless it calls " +
+        "conductor_status. System messages seen: " +
+        JSON.stringify(systems.map((entry) => entry.slice(0, 80))),
     );
-    assert.match(
-      block as string,
-      /Next action: call conductor_classify./,
-      "a fresh INTAKE run has not been classified — adapter/chat-message.ts's classification is a " +
-        "PLACEHOLDER and run.classified is the receipt — so the gate's own legality verdict " +
-        "recommends conductor_classify:\n" + String(block),
-    );
+    // Rank 2, measured on the wire rather than argued from the source: the system
+    // array IS the provider request's prefix, and qwen3.8-27b is hybrid/recurrent
+    // — llama-server forces n_past=0 when no checkpoint covers the divergence, so
+    // one changed byte re-prefills the whole conversation. Epoch 22 paid 734.2 s
+    // of prefill for 281 decoded tokens across three FSM transitions.
+    for (const entry of systems) {
+      assert.ok(
+        !/^Run state: /m.test(entry) && !/^Next action: /m.test(entry),
+        "a volatile state line reached the SYSTEM prefix, which is the defect rank 2 removes:\n" +
+          entry.slice(0, 400),
+      );
+    }
   });
 
   it("gap-003-headers-in-request: the §4.4 X-Conductor-* router tags reach the provider as HTTP headers", () => {
@@ -404,13 +410,31 @@ describe("live injection through a real opencode (GAP-003)", { skip: SKIP }, () 
     );
   });
 
-  it("gap-003-params-in-request: the §4.1 per-role sampling reaches the provider body", () => {
+  it("gap-003-params-in-request: the §4.1 per-role sampling and the rank-1 thinking budget both reach the provider body", () => {
     const request = firstChatRequest();
     assert.equal(
       request.body["temperature"],
       0.4,
       "§4.1 gives the orchestrator temperature 0.4; the provider body carried " +
         JSON.stringify(request.body["temperature"]),
+    );
+    // Rank 1 end to end: the budget is set on chat.params `options`, and this
+    // row is the proof it survives opencode's own body composition as a
+    // TOP-LEVEL field — which is where llama-server reads it from, with
+    // precedence over its server-wide value. Asserted against a REAL provider
+    // request rather than a hook output, because the two are only the same
+    // claim if opencode passes the key through, and that is the step nothing
+    // else here checks.
+    assert.equal(
+      request.body["reasoning_budget_tokens"],
+      3072,
+      "the orchestrator's thinking budget must arrive as a top-level provider-body field. Body " +
+        "keys seen: " + JSON.stringify(Object.keys(request.body)),
+    );
+    assert.equal(
+      request.body["reasoning_budget_message"],
+      "Budget spent. Emit the reply now.",
+      "and the message that ends the thought travels with it",
     );
   });
 
@@ -466,6 +490,31 @@ describe("live injection through a real opencode (GAP-003)", { skip: SKIP }, () 
         `means the once-per-session latch is broken. Tool outputs: ${JSON.stringify(toolOutputs).slice(0, 600)}`,
     );
     assert.match(bannered[0], /pid \d+/, "the banner names the plugin pid an operator checks alive.json against");
+
+    // Rank 2's other half, on the same real tool results: the volatile state that
+    // left the system prefix must actually REACH the model, at the request tail.
+    // Every tool result carries it — unlike the banner, which is once per session.
+    const stateful = toolOutputs.filter((o) => o.includes(STATE_BLOCK_ANCHOR));
+    assert.equal(
+      stateful.length,
+      toolOutputs.length,
+      "EVERY tool result must carry the live state tail: it is the whole delivery channel for run " +
+        "state now, and a turn that misses it is a turn navigating from memory. Tool outputs: " +
+        JSON.stringify(toolOutputs).slice(0, 600),
+    );
+    assert.match(
+      stateful[0],
+      /Next action: call conductor_classify\./,
+      "a fresh INTAKE run has not been classified — adapter/chat-message.ts's classification is a " +
+        "PLACEHOLDER and run.classified is the receipt — so the gate's own legality verdict " +
+        "recommends conductor_classify:\n" + stateful[0].slice(0, 600),
+    );
+    assert.match(
+      stateful[0],
+      /supersedes every earlier state block/,
+      "and it says so: the tail rides remembered history, so stale copies accumulate and only the " +
+        "newest is the run's position",
+    );
   });
 
   it("gap-003-plugin-really-loaded: the conductor tools are registered in the live server", async () => {

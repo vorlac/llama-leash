@@ -1683,6 +1683,17 @@ export const ConductorPlugin: Plugin = async (input: PluginInput) => {
       if (delivery === null) return;
       output.temperature = delivery.params.temperature;
       if (delivery.params.topP !== undefined) output.topP = delivery.params.topP;
+      // The per-role thinking-channel bound, as PROVIDER BODY fields. A key set
+      // on `output.options` lands as a top-level field of the provider request
+      // body (wire-notes:27), the router forwards the body verbatim, and
+      // llama-server reads `reasoning_budget_tokens` / `reasoning_budget_message`
+      // off the request with precedence over its own server-wide value. That
+      // per-request path is what keeps this conductor-only: the flat arms load no
+      // plugin, so their bodies are unchanged and no scored cell is re-priced.
+      if (delivery.params.reasoningBudgetTokens !== undefined) {
+        output.options["reasoning_budget_tokens"] = delivery.params.reasoningBudgetTokens;
+        output.options["reasoning_budget_message"] = delivery.params.reasoningBudgetMessage;
+      }
     },
 
     // §6.4 (c): the §4.4 router tags. ADDED to whatever opencode already carries,
@@ -1861,11 +1872,32 @@ export const ConductorPlugin: Plugin = async (input: PluginInput) => {
     // banner rides the session's FIRST tool result and is conditional on a tool
     // running. HONEST-LIMITS records that rather than implying otherwise.
     //
-    // A conductor_* result is never decorated. Those are structured payloads the
-    // orchestrator parses, and prefixing prose to one would break the parse — a
+    // A conductor_* result is never PREFIXED. Those are structured payloads the
+    // orchestrator parses, and prose ahead of one would break the parse — a
     // banner that costs the run its state transition is worse than no banner.
+    // The state tail below APPENDS after the payload, which leaves the payload's
+    // head intact, and it rides conductor_* results deliberately: the state that
+    // follows a stage call is the position that call just produced.
     "tool.execute.after": async (hook, output) => {
       const sessionID = hook.sessionID;
+
+      // §6.4 live-state delivery. The volatile state tail — Run state, Next
+      // action, the counts — rides EVERY tool result, because this is the one
+      // measured channel that reaches the model at the request TAIL (wire-notes
+      // 20.5), and the tail is the only place a per-request value can live
+      // without invalidating the KV-cache prefix (the system prompt is byte-
+      // stable by construction; adapter/inject.ts renderStableStateBlock).
+      // Composed HERE, after the tool ran, so the block reflects the store the
+      // call just wrote. deliveryFor journals and swallows its own failures.
+      const tailDelivery = deliveryFor(sessionID, "tool.execute.after");
+      if (
+        tailDelivery !== null &&
+        tailDelivery.stateTail.length > 0 &&
+        typeof output.output === "string"
+      ) {
+        output.output = output.output + "\n\n" + tailDelivery.stateTail;
+      }
+
       if (bannered.has(sessionID)) return;
       if (hook.tool.startsWith("conductor_")) return;
       // Mark before composing: a throw while composing must not arm a second

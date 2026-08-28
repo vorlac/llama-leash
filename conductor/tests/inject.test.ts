@@ -74,6 +74,8 @@ import { fileURLToPath } from "node:url";
 // The subject under test — absent at red time (the missing-subject red).
 import {
   buildSystemAppend,
+  REASONING_BUDGET_MESSAGE,
+  renderStateTail,
   recommendedToolOf,
   paramsForRole,
   headersFor,
@@ -173,7 +175,10 @@ const PER_ITEM_TOOLS: readonly string[] = [
   "conductor_publish",
 ];
 
-// The state block is the LAST append entry (pack(s) first, live block last).
+// The stable state anchor is the LAST append entry (pack(s) first, anchor last).
+// The VOLATILE half — run state, Next action, the counts — is renderStateTail's,
+// delivered at the request tail so the system prefix stays byte-stable (rank 2:
+// a byte of run state in the prefix cost epoch 22 three total re-prefills).
 const stateBlockOf = (append: string[]): string => append[append.length - 1];
 
 // Count newline-delimited lines, not counting a single trailing newline as a line
@@ -205,14 +210,20 @@ test("8.2-api: buildSystemAppend/paramsForRole/headersFor exist; append is [role
   // (a) first entry IS the role pack content (orchestrator -> core.md), verbatim.
   assert.equal(append[0], PACKS["core.md"], "append[0] is the orchestrator's core.md pack content");
 
-  // (b) the trailing entry is a non-empty state block naming the recommended tool.
+  // (b) the trailing entry is a non-empty STABLE anchor; the recommendation is
+  // the volatile tail's to name, never the prefix's.
   const block = stateBlockOf(append);
-  assert.ok(block.length > 0, "the state block is non-empty");
+  assert.ok(block.length > 0, "the stable state anchor is non-empty");
   const expected = legalTools(r, items, [], true);
   assert.notEqual(expected.recommended, null, "the fixture state has a recommendation to surface");
+  const tail = renderStateTail(ORCH, r, items, [], ctx());
   assert.ok(
-    block.includes(expected.recommended!.tool),
-    "the state block names legalTools(...).recommended.tool",
+    tail.includes(expected.recommended!.tool),
+    "the state tail names legalTools(...).recommended.tool",
+  );
+  assert.ok(
+    !block.includes(expected.recommended!.tool),
+    "the PREFIX never names the recommendation — that byte changes at every FSM boundary",
   );
 
   // paramsForRole + headersFor minimal shapes.
@@ -267,15 +278,18 @@ test("8.2-role-packs: orchestrator gets core.md + a run block; implementer gets 
   // Orchestrator: core.md first, a RUN-level block (names the run state).
   const orch = buildSystemAppend(ORCH, run({ state: "EXECUTING" }), items, [], PACKS, ctx());
   assert.equal(orch[0], PACKS["core.md"], "orchestrator's first append entry is core.md");
-  assert.ok(stateBlockOf(orch).includes("EXECUTING"), "the orchestrator block reports the run state");
+  const orchTail = renderStateTail(ORCH, run({ state: "EXECUTING" }), items, [], ctx());
+  assert.ok(orchTail.includes("EXECUTING"), "the orchestrator's state tail reports the run state");
 
-  // Implementer working I2: tdd.md first, and its block is about I2 (its id + state).
+  // Implementer working I2: tdd.md first; the stable anchor carries the ASSIGNED
+  // item id (written once at dispatch), and the tail carries its live state.
   const impl: SessionRegistryEntry = { role: "implementer", itemId: "I2" };
   const implAppend = buildSystemAppend(impl, run({ state: "EXECUTING" }), items, [], PACKS, ctx());
   assert.equal(implAppend[0], PACKS["tdd.md"], "implementer's first append entry is tdd.md");
-  const implBlock = stateBlockOf(implAppend);
-  assert.ok(implBlock.includes("I2"), "the implementer block is scoped to its item I2");
-  assert.ok(implBlock.includes("GREEN"), "the implementer block reports I2's item state");
+  assert.ok(stateBlockOf(implAppend).includes("I2"), "the stable anchor names the assigned item I2");
+  const implTail = renderStateTail(impl, run({ state: "EXECUTING" }), items, [], ctx());
+  assert.ok(implTail.includes("I2"), "the implementer tail is scoped to its item I2");
+  assert.ok(implTail.includes("GREEN"), "the implementer tail reports I2's item state");
 });
 
 // ===========================================================================
@@ -292,14 +306,14 @@ test("8.2-30-lines: the state block stays <=30 lines with 40 items (summarized, 
     items.push(item({ id, state: "PENDING", behavioral: true, fileScope: [`src/${id}.ts`] }));
   }
 
-  const block = stateBlockOf(buildSystemAppend(ORCH, run({ state: "EXECUTING" }), items, [], PACKS, ctx()));
+  const block = renderStateTail(ORCH, run({ state: "EXECUTING" }), items, [], ctx());
 
-  assert.ok(lineCount(block) <= 30, `the state block is <=30 lines (was ${lineCount(block)})`);
+  assert.ok(lineCount(block) <= 30, `the state tail is <=30 lines (was ${lineCount(block)})`);
 
   // Summarization: it cannot be naming all 40 items — a fully-listed block would
   // carry every id.
   const named = ids.filter((id) => block.includes(id)).length;
-  assert.ok(named < ids.length, `the block summarizes rather than listing all 40 items (named ${named})`);
+  assert.ok(named < ids.length, `the tail summarizes rather than listing all 40 items (named ${named})`);
 });
 
 // ===========================================================================
@@ -346,10 +360,8 @@ test("8.2-recommended: the block names legalTools(...).recommended across three 
     const tool = expected.recommended!.tool;
     seen.add(tool);
 
-    const block = stateBlockOf(
-      buildSystemAppend(ORCH, kase.r, kase.items, [], PACKS, ctx({ repoConfigured: kase.repoConfigured })),
-    );
-    assert.ok(block.includes(tool), `${kase.label}: the block names the recommended tool ${tool}`);
+    const block = renderStateTail(ORCH, kase.r, kase.items, [], ctx({ repoConfigured: kase.repoConfigured }));
+    assert.ok(block.includes(tool), `${kase.label}: the tail names the recommended tool ${tool}`);
 
     // A per-item recommendation carries its target id — the "with its args" clause.
     const itemId = expected.recommended!.args.itemId;
@@ -384,7 +396,7 @@ test("8.2-one-recommendation: a two-item wave names exactly ONE recommendation a
   assert.notEqual(expected.recommended, null, "the wave has a recommendation");
   const recommendedTool = expected.recommended!.tool;
 
-  const block = stateBlockOf(buildSystemAppend(ORCH, r, items, [], PACKS, ctx()));
+  const block = renderStateTail(ORCH, r, items, [], ctx());
 
   // Exactly ONE recommendation: among the per-item stage tools in the legal set,
   // ONLY the recommended one is named in the block; the others are folded into a
@@ -557,7 +569,7 @@ test("8.2-null-recommendation: a null recommendation renders legalTools(...).why
   const vStalled = legalTools(rStalled, stalledItems, [], true);
   assert.equal(vStalled.recommended, null, "the stalled non-terminal wave really has no recommendation (triggers the bug)");
 
-  const stalledBlock = stateBlockOf(buildSystemAppend(ORCH, rStalled, stalledItems, [], PACKS, ctx()));
+  const stalledBlock = renderStateTail(ORCH, rStalled, stalledItems, [], ctx());
   assert.ok(
     stalledBlock.includes(vStalled.why),
     "the block renders the authoritative stalled rationale (legalTools.why) verbatim",
@@ -575,7 +587,7 @@ test("8.2-null-recommendation: a null recommendation renders legalTools(...).why
   assert.equal(vTerminal.recommended, null, "a terminal run has no recommendation");
   assert.ok(vTerminal.why.startsWith("Terminal run:"), "legalTools' terminal rationale opens with 'Terminal run:'");
 
-  const terminalBlock = stateBlockOf(buildSystemAppend(ORCH, rTerminal, [], [], PACKS, ctx()));
+  const terminalBlock = renderStateTail(ORCH, rTerminal, [], [], ctx());
   assert.ok(
     terminalBlock.includes(vTerminal.why),
     "the block renders the authoritative terminal rationale (legalTools.why) verbatim",
@@ -707,9 +719,9 @@ test("[D32] a sub-session is never told to call a tool its role may not call", (
   const r = run({ state: "INTAKE" });
   const items: ReturnType<typeof item>[] = [];
 
-  const orchBlock = buildSystemAppend(ORCH, r, items, [], PACKS, ctx()).at(-1) ?? "";
+  const orchBlock = renderStateTail(ORCH, r, items, [], ctx());
   const planner: SessionRegistryEntry = { role: "planner" };
-  const plannerBlock = buildSystemAppend(planner, r, items, [], PACKS, ctx()).at(-1) ?? "";
+  const plannerBlock = renderStateTail(planner, r, items, [], ctx());
 
   // The orchestrator's block is unchanged: it MAY call the run's stage tool.
   assert.match(
@@ -763,7 +775,7 @@ test("[D32] the receipt records the recommendation the block actually delivered"
   // tool the block did not name makes the observer's "recommended vs actual"
   // column score a request nobody sent — the exact signal D08 was misread from.
   for (const entry of [ORCH, { role: "planner" } as SessionRegistryEntry]) {
-    const block = buildSystemAppend(entry, r, items, [], PACKS, ctx()).at(-1) ?? "";
+    const block = renderStateTail(entry, r, items, [], ctx());
     const receipt = recommendedToolOf(entry, r, items, [], ctx());
     if (receipt.tool === null) {
       assert.ok(
@@ -777,4 +789,146 @@ test("[D32] the receipt records the recommendation the block actually delivered"
       );
     }
   }
+});
+
+// ===========================================================================
+// [inject-stable-prefix] rank 2: the system append is the KV-cache prefix of
+// every request, and qwen3.8-27b's hybrid cache cannot rewind to an arbitrary
+// offset — a one-byte change is a total re-prefill. Epoch 22 measured three FSM
+// phase boundaries producing three cold orchestrator turns: 734 s of prefill
+// for 281 output tokens. The volatile state must therefore ride the request
+// TAIL, and the prefix must be byte-identical across FSM positions.
+// ===========================================================================
+
+test("[inject-stable-prefix] the composed system append is byte-identical across GateRun states differing in run.state/recommended — the volatile state rides the tail, never the prefix", () => {
+  const items = [item({ id: "I1", state: "PENDING", behavioral: true })];
+
+  // Two run positions with DIFFERENT states and DIFFERENT recommendations.
+  const rIntake = run({ state: "INTAKE", classification: null });
+  const rExecuting = run({ state: "EXECUTING" });
+  assert.notEqual(
+    legalTools(rIntake, items, [], true).recommended!.tool,
+    legalTools(rExecuting, items, [], true).recommended!.tool,
+    "the fixture positions really recommend different tools",
+  );
+
+  const a = buildSystemAppend(ORCH, rIntake, items, [], PACKS, ctx());
+  const b = buildSystemAppend(ORCH, rExecuting, items, [], PACKS, ctx());
+  assert.deepEqual(a, b, "an FSM transition must not move a single byte of the system prefix");
+
+  // The counts are volatile too: questions, taint and overrides must not reach it.
+  const c = buildSystemAppend(
+    ORCH,
+    rExecuting,
+    items,
+    [{ id: "Q1", answeredIso: null }],
+    PACKS,
+    ctx({ taintCount: 3, overridesRemaining: 0 }),
+  );
+  assert.deepEqual(c, b, "question/taint/override counts must not reach the prefix either");
+
+  // And the state still reaches the model: the TAILS differ, and each opens with
+  // the supersedes line so a stale block in remembered history cannot win.
+  const tailA = renderStateTail(ORCH, rIntake, items, [], ctx());
+  const tailB = renderStateTail(ORCH, rExecuting, items, [], ctx());
+  assert.notEqual(tailA, tailB, "the volatile state is in the tail, not deleted");
+
+  // The FIRST turn of a session has had no tool result, so no tail has arrived.
+  // The anchor says what to do until one does — keyed on the ROLE, which is
+  // written once at dispatch, so it stays byte-stable for the session's life.
+  const anchor = b[b.length - 1];
+  assert.match(anchor, /Until one arrives/, "the anchor covers the turn before any tail arrives");
+  // [D32] and it names NO stage tool: a run resumed by a new process can be at
+  // any FSM position, so naming one would tell a session to call something the
+  // gate then refuses — the exact defect D32 records.
+  for (const tool of ["conductor_classify", "conductor_decompose", "conductor_plan", "conductor_dispatch_wave"]) {
+    assert.ok(!anchor.includes(tool), `the stable anchor must name no stage tool; it names ${tool}`);
+  }
+  const subAnchor = buildSystemAppend(
+    { role: "reviewer" } as SessionRegistryEntry, rExecuting, items, [], PACKS, ctx(),
+  ).at(-1) ?? "";
+  assert.match(
+    subAnchor,
+    /reply with your result/,
+    "a dispatched session's next action is always its reply (§3.5), and its anchor says so",
+  );
+  assert.match(
+    tailB,
+    /^Conductor live state \(supersedes every earlier state block/,
+    "the tail opens by superseding every earlier block — stale copies accumulate in history by design",
+  );
+});
+
+// ===========================================================================
+// [inject-reasoning-budget] rank 1: the per-role thinking-channel bound.
+//
+// 93.1% of epoch 22's conductor decode was reasoning, and three messages spent
+// the whole 1,800 s provider ceiling in the thinking channel and returned a
+// reasoning part with NO text part at all. The budget bounds that tail. Each
+// value sits ABOVE the role's measured healthy per-turn reasoning, because a
+// budget fitted below observed healthy thinking is a new defect, not a saving.
+// ===========================================================================
+
+test("[inject-reasoning-budget] paramsForRole carries a thinking budget and its forcing message for budgeted roles, leaves the planner unbudgeted, and never fits a budget under a role's measured healthy reasoning", () => {
+  // Measured p95 per-turn reasoning tokens, epoch 22 (run r-20260828-c828),
+  // split across each assistant message's parts by character share. Where no
+  // direct experiment exists, the budget must sit ABOVE this: a bound under
+  // observed healthy thinking cuts work that completed.
+  const healthyP95: Record<string, number> = {
+    mechanical: 260,
+    orchestrator: 362,
+    skeptic: 469,
+    testWriter: 3272,
+  };
+
+  for (const [role, p95] of Object.entries(healthyP95)) {
+    const params = paramsForRole(role);
+    assert.equal(
+      typeof params.reasoningBudgetTokens,
+      "number",
+      `${role} is a budgeted role — the bound rides its request body`,
+    );
+    assert.ok(
+      params.reasoningBudgetTokens! > p95,
+      `${role}'s budget (${params.reasoningBudgetTokens}) must exceed its measured healthy p95 ` +
+        `(${p95}): with no replay to say otherwise, the conservative bound is the only honest one`,
+    );
+    assert.equal(
+      params.reasoningBudgetMessage,
+      REASONING_BUDGET_MESSAGE,
+      "the budget arrives with the message that ENDS the thought and asks for the reply — a bare " +
+        "truncation produces exactly the reasoning-only reply this bound exists to prevent",
+    );
+  }
+
+  // The REVIEWER is set BELOW its own p95 (12,106) on direct evidence rather
+  // than by that rule. Its four c828 lens briefs replayed one at a time at -1
+  // and at 3,072 summed 42,616 tokens against 12,021 — a 71.8% fall — for the
+  // same three findings, with no reply that validated at -1 failing to validate,
+  // and with the unbudgeted arm's largest line item being a lens that spent its
+  // entire 16,384-token output allowance thinking and returned nothing.
+  const reviewer = paramsForRole("reviewer");
+  assert.equal(
+    reviewer.reasoningBudgetTokens,
+    3072,
+    "the reviewer's bound comes from the paired replay, and lowering it further or raising it back " +
+      "toward p95 needs a new one — not an appeal to the conservative rule the replay displaced",
+  );
+
+  // The planner is the escalation, not a decision taken here: 88.9% reasoning
+  // and 41% of the arm's decode, but the one role where deliberation may be
+  // load-bearing, which needs a scored cell to judge.
+  const planner = paramsForRole("planner");
+  assert.equal(
+    planner.reasoningBudgetTokens,
+    undefined,
+    "the planner stays unbudgeted this iteration — an ABSENT key, so the server's own default " +
+      "stands rather than being overridden with a -1 assertion",
+  );
+  assert.equal(planner.reasoningBudgetMessage, undefined);
+  assert.equal(planner.temperature, 0.7, "and its §4.1 sampling row is untouched");
+
+  // An unknown role gets the §4.1 fallback temperature and no budget: a bound
+  // nobody fitted is not a bound to impose.
+  assert.equal(paramsForRole("unregistered").reasoningBudgetTokens, undefined);
 });

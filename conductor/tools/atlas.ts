@@ -504,17 +504,20 @@ const INJECT_NODES: readonly AtlasNode[] = [
     kind: "inject",
     layer: "conductor",
     what:
-      "A block of at most 30 lines, always last in the append, re-stating: run state, active item, the " +
-      "recommended next tool with its rationale, a count of other legal tools, open questions, blocked " +
-      "and deferred counts, taint count and overrides remaining.",
+      "A block of at most 30 lines re-stating: run state, active item, the recommended next tool with " +
+      "its rationale, a count of other legal tools, open questions, blocked and deferred counts, taint " +
+      "count and overrides remaining. It is delivered at the request TAIL — appended to every tool " +
+      "result — while the system append ends on a byte-stable anchor that carries no live value.",
     enforces:
-      "§6.4 — 're-stated every request, never remembered'. The recommendation comes from the SAME " +
-      "legalTools derivation the phase gate enforces, so the model is never advised to call something " +
-      "the gate will refuse.",
+      "§6.4 — re-derived for every delivery, never read from memory. The recommendation comes from the " +
+      "SAME legalTools derivation the phase gate enforces, so the model is never advised to call " +
+      "something the gate will refuse.",
     source: ["conductor/adapter/inject.ts:124", "conductor/core/gates-phase.ts:246"],
     caveat:
       "With no live run the block is three lines pointing at conductor_status. The 30-line ceiling is " +
-      "asserted by tests, not enforced inside inject.ts.",
+      "asserted by tests, not enforced inside inject.ts. Because the tail rides remembered history, " +
+      "stale copies accumulate: the block opens by superseding every earlier one, and only the newest " +
+      "states the run's position.",
   },
 ];
 
@@ -2207,10 +2210,10 @@ const EDGES: readonly AtlasEdge[] = [
   // Injection.
   { from: "init.ensureWorkspace", to: "inject.compose", kind: "flow" },
   { from: "inject.compose", to: "inject.packs", kind: "flow" },
-  { from: "inject.packs", to: "inject.stateBlock", kind: "flow", label: "state block is always last" },
+  { from: "inject.packs", to: "inject.stateBlock", kind: "flow", label: "packs are the stable prefix" },
   { from: "inject.compose", to: "sink.journal", kind: "write", label: "inject/system-append receipt" },
   { from: "gate.phase", to: "inject.stateBlock", kind: "read", label: "same legalTools derivation" },
-  { from: "inject.stateBlock", to: "entry.model", kind: "flow", label: "system prompt" },
+  { from: "inject.stateBlock", to: "entry.model", kind: "flow", label: "request tail, via every tool result" },
   { from: "hook.chat.params", to: "entry.model", kind: "flow", label: "temperature" },
   { from: "hook.chat.headers", to: "entry.model", kind: "flow", label: "X-Conductor-* tags" },
 

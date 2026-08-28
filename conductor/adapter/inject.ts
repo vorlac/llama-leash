@@ -62,6 +62,65 @@ const ROLE_TEMPERATURE: Record<string, number> = {
   mechanical: 0.1,
 };
 
+// Role -> per-request thinking-channel budget, in tokens. -1 is unbudgeted.
+//
+// 93.1% of the epoch-22 conductor cell's decode was reasoning (76,449 of 82,098
+// reported output tokens; per role: reviewer 97.9%, testWriter 97.7%,
+// orchestrator 89.3%, planner 88.9%, skeptic 88.0%, mechanical 78.7%). The
+// budget rides the REQUEST BODY, not the server: `--reasoning-budget` is
+// server-wide and one llama-server serves all three arms, so a server-wide clamp
+// helps the conductor arm 6-19x more than the flat arms and voids every cell
+// already scored.
+//
+// WHAT THESE NUMBERS ARE FITTED TO. Epoch 22's measured per-turn reasoning
+// (n turns, median, p95 tokens): mechanical 2/180/260, orchestrator 14/157/362,
+// skeptic 4/292/469, testWriter 5/177/3272, reviewer 4/4731/12106,
+// planner 4/6454/17187. Every role except the reviewer is budgeted ABOVE its
+// own p95, which is the conservative default where no direct evidence exists:
+// a bound under observed healthy thinking would cut work that completed.
+//
+// THE REVIEWER IS THE EXCEPTION, and it is set from a paired replay rather than
+// from that rule. Its four c828 lens briefs were rebuilt and re-run one at a
+// time at -1 and at 3072, judged on the SUMMED tokens across all four because
+// per-brief deltas swing either way:
+//
+//   lens            -1 tokens                    3072 tokens
+//   correctness     13,172 (2 findings)           3,345 (1 finding)
+//   completeness     6,719 (0 findings — an       3,325 (1 finding)
+//                           empty review)
+//   decomposition    6,341 (1 finding)            2,643 (1 finding)
+//   minimality      16,384 (the OUTPUT CAP, and   2,708 (valid, 0 findings)
+//                           no reply at all)
+//   SUM             42,616                       12,021   -71.8%
+//
+// Same total findings — three either way — for 28% of the tokens, with no reply
+// that validated at -1 failing to validate at 3072. The unbudgeted arm's largest
+// line item is a lens that spent its ENTIRE 16,384-token output allowance in the
+// thinking channel and returned zero characters: 38% of that arm's decode bought
+// nothing. So the bound is not merely a tail guard for the reviewer; below its
+// own observed p95 it is also where the runaway stops.
+//
+// The PLANNER is deliberately unbudgeted. It is 88.9% reasoning and 41% of the
+// arm's decode — the largest single prize — but it is also the one role where
+// deliberation may be load-bearing, and that is a quality trade no cost metric in
+// this repository can see. The reviewer replay is the instrument that would
+// settle it, and it has not been run for the planner. Escalation, not a decision
+// to take here.
+const ROLE_REASONING_BUDGET: Record<string, number> = {
+  orchestrator: 3072,
+  planner: -1,
+  testWriter: 4096,
+  implementer: 4096,
+  reviewer: 3072,
+  skeptic: 3072,
+  mechanical: 3072,
+};
+
+// What the model is told when the budget runs out. It matters that this is an
+// instruction to ANSWER rather than a truncation: cutting a reply off mid-thought
+// yields the empty-text/reasoning-only message this budget exists to prevent.
+export const REASONING_BUDGET_MESSAGE = "Budget spent. Emit the reply now.";
+
 // Role -> §4.4 priority tag (interactive | review | batch), derived from §4.1 col 5.
 const ROLE_PRIORITY: Record<string, string> = {
   orchestrator: "interactive",
@@ -141,12 +200,63 @@ function recommendationFor(
   return callerAllowed(runRecommended.tool, caller).ok ? runRecommended : null;
 }
 
-// Render the live state block — the LAST append entry, ≤30 lines, re-stated every
-// request. It SUMMARIZES: it names only the single recommended tool (and, for a
-// sub-session, its own active item), never the full item list, so it stays bounded
-// no matter how many items the run carries. The other legal tools are folded into a
-// numeric COUNT — never a second "do this" that would contradict the recommendation.
-function renderStateBlock(
+// The STABLE anchor — the LAST append entry, byte-identical for the life of a
+// session by construction: it reads nothing but the registry entry, which is
+// written once at dispatch. The live values it used to carry ride each request's
+// TAIL instead (renderStateTail below), because the system prompt is the KV-cache
+// prefix of every request: qwen3.8-27b is hybrid/recurrent, llama-server cannot
+// rewind its cache to an arbitrary offset, and a one-byte change here is a total
+// re-prefill of the whole conversation. Epoch 22 measured exactly that — three
+// FSM phase boundaries, three cold orchestrator turns, 734 s of prefill for 281
+// output tokens.
+function renderStableStateBlock(registryEntry: SessionRegistryEntry): string {
+  const lines: string[] = [];
+  lines.push(
+    "Conductor live state — the live values ride each request's TAIL, not this header.",
+  );
+  lines.push(
+    'Trust only the NEWEST block in this conversation opening "Conductor live state ' +
+      '(supersedes" — it is the run\'s current position, re-derived at that instant; every ' +
+      "earlier one is a position the run has already left. It arrives appended to each " +
+      "tool result and to each conductor re-prompt. In a brand-new conversation none has " +
+      "arrived yet: your doctrine pack and the prompt you were handed are the whole brief " +
+      "until one does.",
+  );
+  // The item id is written once at dispatch and never moves; the item's STATE is
+  // live and rides the tail.
+  if (registryEntry.itemId !== undefined) {
+    lines.push(`Your assigned item: ${registryEntry.itemId}.`);
+  }
+  // What to do on the FIRST turn of a session, before any tool result has
+  // carried a state block. Keyed on the ROLE, which is written once at dispatch
+  // and never changes, so this stays byte-stable for the session's life.
+  //
+  // No stage tool is named here. A run resumed by a second process can be at ANY
+  // FSM position, so naming one would be the D32 defect — telling a session to
+  // call something the gate then refuses. conductor_status is named for the same
+  // reason renderNoRunStateBlock names it: with no action known there is no
+  // action to compete with, and it is the one tool that reports the position.
+  if (callerKindOf(registryEntry.role) === "sub-session") {
+    lines.push(
+      "Until one arrives, do the work your brief asks for and reply with your result: a " +
+        "dispatched session's next action is always its reply (§3.5).",
+    );
+  } else {
+    lines.push(
+      "Until one arrives, do not assume a stage: conductor_status reports where the run " +
+        "actually is.",
+    );
+  }
+  return lines.join("\n");
+}
+
+// Render the live state tail — the volatile half of the state block, ≤30 lines,
+// re-derived and re-stated at every delivery (§6.4), never remembered. It
+// SUMMARIZES: it names only the single recommended tool (and, for a sub-session,
+// its own active item), never the full item list, so it stays bounded no matter
+// how many items the run carries. The other legal tools are folded into a numeric
+// COUNT — never a second "do this" that would contradict the recommendation.
+export function renderStateTail(
   registryEntry: SessionRegistryEntry,
   run: GateRun,
   items: GateItem[],
@@ -178,7 +288,9 @@ function renderStateBlock(
   const deferred = items.filter((it) => it.deferred !== null).length;
 
   const lines: string[] = [];
-  lines.push("Conductor live state — re-stated every request (§6.4), never remembered.");
+  lines.push(
+    "Conductor live state (supersedes every earlier state block — trust only the newest).",
+  );
   lines.push(`Run state: ${run.state}`);
 
   // A sub-session bound to an item reports THAT item's id and FSM state (the block's
@@ -261,7 +373,7 @@ export function recommendedToolOf(
 
 // The state block for a workspace that has no live run: the §3.2 fact that a run
 // is created when the orchestrator receives a prompt. It is a SEPARATE rendering
-// rather than renderStateBlock over a fabricated run, because every field that
+// rather than renderStateTail over a fabricated run, because every field that
 // block reports (state, recommendation, counts) would be an invention here, and a
 // state block that invents the run state is worse than one that says there is none.
 export function renderNoRunStateBlock(): string {
@@ -322,10 +434,17 @@ function packTextsFor(packFiles: string[], packs: Record<string, string>): strin
 }
 
 // The `experimental.chat.system.transform` body: [ primaryPack, ...secondaryPacks,
-// stateBlock ]. append[0] is the role's primary doctrine pack VERBATIM from the
-// cached map; the LAST entry is the live state block. An unknown role falls back to
-// core.md (the orchestrator/mechanical lite doctrine) so an unregistered session
-// still receives grounding rather than an empty system append.
+// stableStateBlock ]. append[0] is the role's primary doctrine pack VERBATIM from
+// the cached map; the LAST entry is the stable state anchor — the LIVE values ride
+// the request tail (renderStateTail), never the system prompt, so the prefix stays
+// byte-stable across FSM transitions and the KV cache survives them. An unknown
+// role falls back to core.md (the orchestrator/mechanical lite doctrine) so an
+// unregistered session still receives grounding rather than an empty system append.
+//
+// `run`, `questions` and `ctx` are still taken — they are the signature the §6.4
+// ledger names — but nothing byte-varying is rendered from them: that is the
+// mechanism under test in [inject-stable-prefix], and the ONE exception is the
+// items-driven pack selection (§4.1 debug posture), which is doctrine, not state.
 export function buildSystemAppend(
   registryEntry: SessionRegistryEntry,
   run: GateRun,
@@ -334,8 +453,11 @@ export function buildSystemAppend(
   packs: Record<string, string>,
   ctx: InjectCtx,
 ): string[] {
+  void run;
+  void questions;
+  void ctx;
   const append = packTextsFor(packFilesFor(registryEntry, items), packs);
-  append.push(renderStateBlock(registryEntry, run, items, questions, ctx));
+  append.push(renderStableStateBlock(registryEntry));
   return append;
 }
 
@@ -343,8 +465,27 @@ export function buildSystemAppend(
 // (b) paramsForRole — the `chat.params` sampling table (§4.1).
 // ---------------------------------------------------------------------------
 
-export function paramsForRole(role: string): { temperature: number; topP?: number } {
-  return { temperature: ROLE_TEMPERATURE[role] ?? 0.4 };
+export function paramsForRole(role: string): {
+  temperature: number;
+  topP?: number;
+  // The thinking-channel bound and the message that ends it. Both absent for an
+  // unbudgeted role (planner, and any role not in the table): an absent key
+  // leaves the server's own default standing, where a -1 would assert one.
+  reasoningBudgetTokens?: number;
+  reasoningBudgetMessage?: string;
+} {
+  const params: {
+    temperature: number;
+    topP?: number;
+    reasoningBudgetTokens?: number;
+    reasoningBudgetMessage?: string;
+  } = { temperature: ROLE_TEMPERATURE[role] ?? 0.4 };
+  const budget = ROLE_REASONING_BUDGET[role];
+  if (budget !== undefined && budget > 0) {
+    params.reasoningBudgetTokens = budget;
+    params.reasoningBudgetMessage = REASONING_BUDGET_MESSAGE;
+  }
+  return params;
 }
 
 // ---------------------------------------------------------------------------
@@ -402,18 +543,30 @@ export interface Delivery {
   role: string;
   packFiles: string[];
   packDigest: string;
-  // The live state block, named separately from `system` so a caller can RECORD
-  // that it went (and how big it was) without re-deriving which entry it is. A
-  // delivery whose doctrine arrives and whose block does not is the §6.4 half-miss
-  // that leaves a 32k model with no runtime navigation at all.
+  // The stable state anchor — the last system entry — named separately from
+  // `system` so a caller can RECORD that it went (and how big it was) without
+  // re-deriving which entry it is. A delivery whose doctrine arrives and whose
+  // block does not is the §6.4 half-miss that leaves a 32k model with no runtime
+  // navigation at all.
   stateBlock: string;
+  // The VOLATILE half of the state block — Run state, Next action, the counts —
+  // re-derived per delivery and carried at the request TAIL (a tool-result
+  // decoration or a re-prompt), never in the system prefix: a byte of it in the
+  // prefix costs a total re-prefill on a cache the model cannot rewind. Empty
+  // for a workspace with no live run.
+  stateTail: string;
   // The tool the state block told this session to call next, and the item it
   // named, as fields. Both null for a delivery that recommends nothing (a
   // terminal run, a workspace with no run at all).
   recommended: string | null;
   recommendedItem: string | null;
   system: string[];
-  params: { temperature: number; topP?: number };
+  params: {
+    temperature: number;
+    topP?: number;
+    reasoningBudgetTokens?: number;
+    reasoningBudgetMessage?: string;
+  };
   headers: Record<string, string>;
 }
 
@@ -462,6 +615,10 @@ export function composeDelivery(input: {
     packFiles,
     packDigest: packDigestOf(packFiles, packs),
     stateBlock: system[system.length - 1] ?? "",
+    stateTail:
+      state === null
+        ? ""
+        : renderStateTail(registryEntry, state.run, state.items, state.questions, state.ctx),
     recommended: recommendation.tool,
     recommendedItem: recommendation.itemId,
     system,
