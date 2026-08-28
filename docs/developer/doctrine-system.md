@@ -52,7 +52,7 @@ at all, because the obligation is fully mechanical and prose would add nothing.
 | verification-before-completion     | Every FSM advance re-derives evidence in the handler; `conductor_report` re-runs the full verify itself                                                                               | `core.md` — evidence before claims, forbidden satisfaction phrases             |
 | systematic-debugging               | DEBUG sub-state entered on validate failure; `debugFixCap` triggers a surfaced architecture escalation                                                                                | `debug.md` — four phases, one-hypothesis rule, 3-fix architecture question     |
 | brainstorming                      | INTAKE classification plus skeptic check; decision records require ≥2 options with scores; human-territory classifier gates the ask                                                   | `core.md` decisions section plus the §6.2 protocol                             |
-| writing-plans                      | Plan schema plus placeholder-scan lens in plan review; bite-size enforced by decomposition size checks                                                                                | `plan.md` — exact paths, complete code, no-placeholder patterns by name        |
+| writing-plans                      | Plan schema plus placeholder-scan lens in plan review; bite-size enforced by decomposition size checks                                                                                | `plan.md` — exact paths, complete code where acceptance leaves a choice, no-placeholder patterns        |
 | subagent-driven-development        | The executor loop *is* this skill: a fresh sub-session per item; spec-before-quality preserved as adjudication order; implementer status protocol including re-split escalation       | `review.md` ordering section                                                   |
 | dispatching-parallel-agents        | Wave scheduler independence criteria (dependencies plus scope disjointness)                                                                                                           | `decompose.md` independence section                                            |
 | requesting-code-review             | Reviewer lens prompts derive from the code-reviewer template (severity calibration, `file:line` specificity; an empty findings array *is* the approval verdict)                       | `review.md`                                                                    |
@@ -101,10 +101,12 @@ would take another item's coverage with it.
 ### [`plan.md`](../../conductor/doctrine/plan.md)
 
 The planner's second pack. Three rules: exact repository-relative paths for every step,
-bite-sized steps, and complete code for any step not mechanically obvious from its
-description. Non-obvious rule: **"similar to task N" is a named defect**, alongside
+bite-sized steps, and complete code only where the item's `acceptance` and `testScope` leave
+a real choice open — everywhere else the step names its path, its symbol and its change and
+stops, because the acceptance the planner would be transcribing is the same acceptance the
+implementer reads. Non-obvious rule: **"similar to task N" is a named defect**, alongside
 to-be-determined steps and bare "add error handling". Cross-references hide exactly the
-decisions a plan exists to fix, and they rot when the referenced step changes.
+decisions a plan exists to fix.
 
 ### [`tdd.md`](../../conductor/doctrine/tdd.md)
 
@@ -590,7 +592,7 @@ relative to the test file, not the working directory.
 | `8.1-anchors-core`            | `maxOverridesPerItem`, `maxOverridesPerRun`, "exhaustion", "env stop"                                                                                                                    |
 | `8.1-anchors-core-forbidden`  | "should work", "should pass", "looks good", framed as a ban                                                                                                                              |
 | `8.1-anchors-core-ponytail`   | "cheaper", "reuse", "minimal" or "least"                                                                                                                                                 |
-| `8.1-anchors-plan`            | Exact paths, complete code, "placeholder"                                                                                                                                                |
+| `8.1-anchors-plan`            | Exact paths, complete code, "placeholder" (`[D48]` pins the acceptance condition on the code rule)                                                                                                                                                |
 | `8.1-anchors-skeptic`         | "refute", the ⌈k/2⌉ majority threshold, "abstention" and `refutationEvidence`, and the sentence "an abstention upholds"; it also fails if the pack tells a skeptic to default to refuted |
 | `8.1-anchors-receive`         | "verify before implementing", the banned "You're absolutely right"                                                                                                                       |
 | `8.1-no-todo`                 | No client name over all nine files, and a placeholder marker only inside the quoted clause that forbids it                                                                               |

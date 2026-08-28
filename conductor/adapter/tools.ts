@@ -214,10 +214,28 @@ const WRITE_TOOLS: readonly string[] = ["edit", "write"];
 // WRITE so a gate crash on one fails closed (G5).
 const DENIED_TOOLS: readonly string[] = ["apply_patch", "patch"];
 
+// The operator-question tool, refused outright in every session. Its side-effect
+// class is R0 — it reaches neither the tree nor the network — but its EFFECT is
+// to suspend the calling session until an operator answers, and a benchmark cell
+// is headless `opencode run`: no answer channel exists, so the call does not
+// fail, it waits forever. Measured in epoch 22 (run r-20260828-c828): a
+// test-writer's `question` call was the journal's last record and the session
+// sat 78.7 minutes at zero progress with no request in flight. The fragment
+// strips the tool from every agent's offered set (`tools.question: false`);
+// this refusal is the latent-surface pin behind that config, so an opencode
+// bump that re-offers the tool meets a readable refusal instead of a silent
+// hang. opencode offers `question` only to its app/cli/desktop clients (or
+// under OPENCODE_ENABLE_QUESTION_TOOL) — `opencode run` is the cli client,
+// which is why the wire-contract fixture never sees it and a cell does.
+const QUESTION_TOOL = "question";
+
 export function classifyTool(toolName: string, command?: string): ToolClass {
   if (toolName === SPAWN_TOOL) return "spawn";
   if (toolName.startsWith("conductor_")) return "conductor";
-  if (WRITE_TOOLS.includes(toolName) || DENIED_TOOLS.includes(toolName)) return "write";
+  // QUESTION_TOOL classifies as write on the patch tools' terms: a call the gate
+  // refuses must be guarded, so a gate crash on it fails CLOSED (G5).
+  if (WRITE_TOOLS.includes(toolName) || DENIED_TOOLS.includes(toolName) || toolName === QUESTION_TOOL)
+    return "write";
   if (toolName === "bash") {
     const text = command ?? "";
     // An interpreter program naming the state area counts as a write even when no
@@ -546,6 +564,22 @@ export function gateBeforeToolCall(input: GateHookInput): void {
       "the " +
         input.toolName +
         " tool is denied in every session: a patch body carries its own write targets in a form no gate adjudicates, so the edit-scope gate cannot bound it. Use the edit/write tools, whose target is a single path this session's scope is checked against",
+    );
+  }
+
+  // (a0b) The question tool, refused before every other gate and in every
+  //       session. Not a reach problem — BUILTIN_SIDE_EFFECT keeps it R0 — but a
+  //       liveness one: a headless run has no operator, so the call blocks its
+  //       session indefinitely rather than erroring. The refusal deliberately
+  //       does NOT direct the model to a NEEDS_CONTEXT disposition: the observed
+  //       stall was a degenerate end-of-turn call from a session whose work was
+  //       already complete, and steering such a session toward "blocked" would
+  //       convert a finished item into a stuck one.
+  if (input.toolName === QUESTION_TOOL) {
+    denyThrow(
+      input,
+      "tool",
+      "the question tool is denied in every session: this run is headless, so no operator exists to answer and the call parks its session indefinitely instead of returning. If the work is finished, reply with the result the brief asks for; if context is genuinely missing, say so in that reply rather than asking",
     );
   }
 
@@ -2163,12 +2197,15 @@ export function scopableSource(root: string, files: readonly string[]): Scopable
 export function scopableFilesSection(
   files: readonly string[],
   source: readonly ScopableSource[] = [],
+  verb = "decompose",
 ): string {
   if (files.length === 0) return "";
   if (source.length === files.length) {
     return (
       "\n\nThe files those globs own, with their current contents — this is the whole of " +
-      "what they hold, so decompose from here rather than reading them again:\n\n" +
+      "what they hold, so " +
+      verb +
+      " from here rather than reading them again:\n\n" +
       source.map((f) => "--- " + f.rel + " ---\n" + f.text.trimEnd() + "\n").join("\n") +
       "\n"
     );
@@ -2406,15 +2443,24 @@ export function readQueueJson(runDir: string, tool: string): Queue {
 }
 
 // The `plan.md` doctrine, inlined: the writing-plans rules (exact paths,
-// bite-sized steps, complete code for non-obvious steps, NO placeholders — the
-// three §3.2 defects named), the §2.7 >=2-scored-options rule, and the §6.3
-// ponytail guardrails at the configured intensity, over the decomposed queue the
-// plan must cover item by item.
+// bite-sized steps, complete code where the item's acceptance leaves a choice
+// open, NO placeholders — the three §3.2 defects named), the §2.7
+// >=2-scored-options rule, and the §6.3 ponytail guardrails at the configured
+// intensity, over the decomposed queue the plan must cover item by item.
+//
+// It carries the scopable tree for the same reason decomposePrompt does (D36): a
+// planner that is not handed the code reads it, once per dispatch, at a minute a
+// read — and the plan stage re-dispatches on every compaction, so the re-read is
+// paid per lap rather than once. It also states the one fact the model cannot
+// observe about its own dispatch: the reply is capped, and overrunning the cap
+// loses the whole plan rather than the tail of it.
 export function planPrompt(
   userPrompt: string,
   queue: Queue,
   config: Config,
   packs: Record<string, string>,
+  scopable: readonly string[] = [],
+  source: readonly ScopableSource[] = [],
 ): string {
   const itemLines = queue.items
     .map(
@@ -2446,7 +2492,12 @@ export function planPrompt(
     "accepted: a queue that presents no consequential fork records none. Do not invent a fork to " +
     'fill the field, and do not spend a step deciding whether it may be empty.\nPonytail intensity is "' +
     config.ponytail +
-    '" (§6.3).\n\nQUEUE:\n' +
+    '" (§6.3).\n\nYour whole plan is ONE reply and that reply has a hard token cap. A document that ' +
+    "overruns it is truncated mid-JSON, and a truncated reply is not a partial plan — the dispatch " +
+    "is lost entirely and starts again from nothing. The shortest plan that leaves no choice open " +
+    "is the one that survives.\n" +
+    scopableFilesSection(scopable, source, "plan") +
+    "\nQUEUE:\n" +
     itemLines +
     "\n\nREQUEST:\n" +
     userPrompt
@@ -2520,7 +2571,15 @@ export async function handlePlan(input: PlanInput): Promise<PlanResult> {
   const queue = readQueueJson(runDir, "conductor_plan");
 
   // (2) derive: the planner writes plan.md; the plan.md doctrine disposes.
-  const basePrompt = planPrompt(run.prompt, queue, config, input.packs);
+  const planFiles = scopableFiles(store.root, config);
+  const basePrompt = planPrompt(
+    run.prompt,
+    queue,
+    config,
+    input.packs,
+    planFiles,
+    scopableSource(store.root, planFiles),
+  );
   let promptText = basePrompt;
   let accepted: Plan | null = null;
   let acceptedProposals: PlanDecision[] = [];
@@ -2701,6 +2760,8 @@ export function lensPrompt(
   planMd: string,
   queue: Queue,
   packs: Record<string, string>,
+  scopable: readonly string[] = [],
+  source: readonly ScopableSource[] = [],
 ): string {
   return (
     "You are a plan reviewer holding ONE lens over the whole plan and its queue. Reply with a " +
@@ -2723,7 +2784,12 @@ export function lensPrompt(
     "\" and make `evidence` cite the plan section or the queue item id your claim rests on: a " +
     "claim naming the item id or the file path it is about is the one that can be acted on.\n" +
     "Give each finding a short stable `id` and a `suggestedFix` that is the smallest correct " +
-    "change." +
+    "change.\n" +
+    "Your whole reply is ONE message under a hard token cap. A reply that overruns it is " +
+    "truncated mid-JSON, and a truncated reply is not a partial review — the lens is discarded " +
+    "and re-run from nothing. Keep each finding to its claim, its evidence and its fix; the " +
+    "reasoning that got you there does not belong in the reply.\n" +
+    scopableFilesSection(scopable, source, "review") +
     planReviewContext(userPrompt, planMd, queue)
   );
 }
@@ -2806,6 +2872,12 @@ function renderFinding(raised: RaisedFinding): string {
 // (so the revision is judged by the same law it will be judged by), plus the
 // plan as it stands, plus the surviving findings, plus the demand for a
 // stand-alone replacement document — plan.md is re-written, never appended to.
+//
+// It carries no scopable tree, unlike the first dispatch: this is the widest
+// prompt the planner ever sees (doctrine, the whole standing plan, every
+// surviving finding), and the standing plan already names by path every file the
+// revision touches. Inlining the tree here would spend window on code the
+// document in front of it already cites.
 function planRevisionPrompt(
   userPrompt: string,
   queue: Queue,
@@ -2880,6 +2952,8 @@ async function planReviewRound(
   planMd: string,
   queue: Queue,
   packs: Record<string, string>,
+  scopable: readonly string[] = [],
+  source: readonly ScopableSource[] = [],
 ): Promise<{ raised: RaisedFinding[]; survivors: RaisedFinding[]; lenses: string[] }> {
   // (a) the lens fan-out.
   // COVERAGE FIRST. §3.2 names four lenses and they are the substance of this
@@ -2902,7 +2976,7 @@ async function planReviewRound(
     itemId: "",
     tree: NO_TREE,
     writeCapable: false,
-    prompt: lensPrompt(lens, userPrompt, planMd, queue, packs),
+    prompt: lensPrompt(lens, userPrompt, planMd, queue, packs, scopable, source),
     schemaName: "Findings",
     priority: "interactive",
     lens: lens.id,
@@ -3079,6 +3153,14 @@ export async function handlePlanReview(input: PlanReviewInput): Promise<PlanRevi
   let planMd = readFileSync(planPath, "utf8");
   const max = config.workflow.planReviewMaxRounds;
 
+  // The scopable tree, read ONCE for every lens of every round. A lens judging a
+  // plan has to know the code the plan will touch, and four lenses re-deriving it
+  // independently is D36's cost multiplied by the fan-out width: the epoch-21
+  // review spent ~21 of its first 26 minutes on reads, then compacted and
+  // truncated its verdict mid-JSON on two lenses of four.
+  const reviewFiles = scopableFiles(store.root, config);
+  const reviewSource = scopableSource(store.root, reviewFiles);
+
   // (2) derive: review -> refute -> adjudicate -> (revise and go again). The
   //     loop is bounded by the cap the gate enforces, and every iteration either
   //     exits or consumes one revision round, so it always terminates.
@@ -3086,7 +3168,16 @@ export async function handlePlanReview(input: PlanReviewInput): Promise<PlanRevi
   let lensRoster: string[] = [];
   let raisedCounts = { major: 0, minor: 0, nit: 0 };
   for (;;) {
-    const outcome = await planReviewRound(fanout, config, run.prompt, planMd, queue, input.packs);
+    const outcome = await planReviewRound(
+      fanout,
+      config,
+      run.prompt,
+      planMd,
+      queue,
+      input.packs,
+      reviewFiles,
+      reviewSource,
+    );
     survivors = outcome.survivors;
     lensRoster = outcome.lenses;
     raisedCounts = {

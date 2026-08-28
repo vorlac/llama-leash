@@ -197,8 +197,9 @@ an `add`, which reborns the item `PENDING` with no evidence.
 ### PLANNED — write the plan
 
 `conductor_plan` dispatches the `planner` with the `plan.md` doctrine pack: exact paths,
-bite-sized steps, complete code for non-obvious steps, no placeholders. "TBD", "add error
-handling", and "similar to task N" are plan defects by name, not style preferences. The
+bite-sized steps, complete code only where the item's acceptance and testScope leave a choice
+open, no placeholders. "TBD", "add error handling", and "similar to task N" are plan defects
+by name, not style preferences. The
 output is `plan.md`: per-item test strategy, design alternatives considered (at least two
 for every consequential fork, which the handler extracts into `decisions.jsonl`), risks, and
 a proposed execution order.

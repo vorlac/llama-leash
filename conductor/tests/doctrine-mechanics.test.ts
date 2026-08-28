@@ -1111,3 +1111,230 @@ test("D45b: both prompts state the first-path clause", () => {
     );
   }
 });
+
+// ===========================================================================
+// [D48] The plan stage does not terminate, because its artifact is specified
+// larger than the reply that has to carry it.
+//
+// Epoch 20 ran conductor_plan on grid2048-headless-py with every sub-session
+// deadline removed. ONE dispatch ran 360 minutes, compacted 16 times, hit the
+// 16,384-token output cap exactly 9 times, spent 307,031 completion tokens —
+// 11x the entire baseline budget for the same task — and left the tree
+// byte-identical to the seed. Each lap climbed past the compaction threshold,
+// was compacted, re-read the tree, rebuilt the same reasoning, reached the emit
+// step and was truncated. Three earlier epochs recorded this as "timeout at
+// conductor_plan": the symptom recorded as the cause, because no budget exits
+// that loop. Everything upstream is affordable — intake 11.5 min, decompose two
+// rolls at 13.5/13.7 min producing three well-formed items.
+//
+// Two causes, both in this file's neighbourhood rather than in the serving stack:
+//
+//   (a) plan.md demanded complete code for every non-obvious step, so plan.md
+//       had to contain the solution before the implementer wrote it. On a
+//       two-function task the plan is larger than the diff and larger than the
+//       window, and raising the output cap lowers the compaction threshold by
+//       the same amount — the two walls are one number pulling both ways.
+//   (b) planPrompt was the one planner dispatch carrying no scopableFilesSection,
+//       so every lap re-read the tree that decomposePrompt is handed for free
+//       (D36) — 20 reads and 3 bashes per lap, paid per compaction, not once.
+// ===========================================================================
+
+test("[D48] plan.md demands complete code only where the item's acceptance leaves a choice open", () => {
+  const plan = readPack("plan.md");
+  const flatPlan = flat(plan);
+
+  assert.ok(
+    !flatPlan.includes("Every non-obvious step carries complete code, not a sketch"),
+    "the unconditional rule is what made plan.md contain the solution before the implementer " +
+      "wrote it; it must not survive anywhere in the pack",
+  );
+
+  // The relaxation has to be CONDITIONED, not dropped: the doctrine's reason (a
+  // plan that hand-waves is a plan that defers decisions) is real. The condition
+  // is the item's own specification, which the planner is already handed.
+  const selfCheck = packSection(plan, "Self-check before returning");
+  assert.notEqual(selfCheck, null, "plan.md must still carry the section the plan prompt composes from");
+  const flatCheck = flat(selfCheck ?? "");
+  assert.match(
+    flatCheck,
+    /acceptance/i,
+    "the self-check must name what now decides whether a step carries code; it reads: " + flatCheck,
+  );
+  assert.match(
+    flatCheck,
+    /testScope/i,
+    "and the test that proves the behaviour, which is the other half of the specification",
+  );
+  assert.match(
+    flatCheck,
+    /complete code|exact signature/i,
+    "and it must still demand real code where the choice IS open — this is a narrowing, not a repeal",
+  );
+});
+
+test("[D48] the conductor_plan brief carries the narrowed rule, not only the pack", () => {
+  // The pack reaches the planner twice (ROLE_PACKS injects plan.md whole, and the
+  // brief quotes the self-check verbatim). The brief is the copy the model reads
+  // last, so the narrowing is only load-bearing if it survives the slice.
+  const brief = flat(planPrompt("do the work", testQueue(), testConfig(), packMap()));
+  assert.match(
+    brief,
+    /acceptance/i,
+    "the narrowing reaches the dispatch only through plan.md's self-check slice",
+  );
+  assert.ok(
+    !brief.includes("Every non-obvious step carries complete code, not a sketch"),
+    "and the retired unconditional rule reaches it through no route at all",
+  );
+});
+
+test("[D48] the plan brief states the reply cap, which the model cannot otherwise observe", () => {
+  const brief = planPrompt("do the work", testQueue(), testConfig(), packMap());
+  assert.match(
+    brief,
+    /ONE reply/,
+    "a planner truncated at the output cap 9 times was never told the reply was bounded",
+  );
+  assert.match(
+    brief,
+    /truncated/i,
+    "and must be told what overrunning costs — the dispatch, not the tail of the document",
+  );
+});
+
+test("[D48] the plan brief carries the scopable tree, as the decompose brief already does", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "d48-"));
+  const write = (rel: string, body: string): void => {
+    mkdirSync(path.join(root, path.dirname(rel)), { recursive: true });
+    writeFileSync(path.join(root, rel), body);
+  };
+  write("src/board.py", "def spawn(board):\n    return board\n");
+  write("README.md", "# not scopable\n");
+
+  const config = testConfig();
+  const files = scopableFiles(root, config);
+  const source = scopableSource(root, files);
+  assert.equal(source.length, files.length, "premise: a repo this small is carried whole");
+
+  const bare = planPrompt("do the work", testQueue(), config, packMap());
+  assert.ok(
+    !bare.includes("def spawn(board)"),
+    "premise: the brief carries the tree only when the handler passes it",
+  );
+
+  const brief = planPrompt("do the work", testQueue(), config, packMap(), files, source);
+  assert.match(
+    brief,
+    /def spawn\(board\)/,
+    "the code itself, not a promise of it — a planner that must read the tree reads it once " +
+      "per dispatch, and this stage re-dispatches on every compaction",
+  );
+  assert.ok(!brief.includes("not scopable"), "and nothing behavioralPaths does not own");
+  assert.match(
+    brief,
+    /plan from here rather than reading them again/,
+    "the section says why it is there, in the verb of the stage that receives it",
+  );
+
+  rmSync(root, { recursive: true, force: true });
+});
+
+// ===========================================================================
+// [D49] The plan-review fan-out truncates its verdict, which is [D48]'s defect
+// multiplied by the lens count.
+//
+// Epoch 21 fixed conductor_plan and the run reached PLANNED in 22 minutes. The
+// stage BELOW it then spent 4h28m and 12 compactions on four lenses:
+//
+//   correctness    3 attempts, schema-invalid, then {"findings":[]} on re-run
+//   completeness   3 attempts, schema-invalid, then a real finding on re-run
+//   decomposition  clean, 1 attempt, both rounds
+//   minimality     2 attempts -> {"findings":[]}
+//
+// Every failed attempt was the same error: `JSON Parse error: Unexpected EOF` —
+// the reply cut off mid-object. The correctness lens had a REAL finding it could
+// not deliver ("the plan's risk note makes a false blanket claim about
+// rng_state"), spent 153 minutes on three attempts, and on the re-run returned
+// an empty findings list. The run then advanced on `survivingMajors === 0`.
+//
+// Two causes, the same two as [D48]:
+//
+//   (a) lensPrompt carried no scopableFilesSection, so four lenses each re-read
+//       the tree independently — ~21 of the stage's first 26 minutes were reads
+//       — and pushed past the compaction threshold before writing a word.
+//   (b) nothing told a lens its reply was bounded, so it wrote its reasoning
+//       into the reply and was cut off inside the JSON.
+//
+// An empty findings list is the dangerous outcome, not the hard failure: it
+// parses, it satisfies the schema, and downstream it reads as a lens that
+// reviewed the plan and approved it.
+// ===========================================================================
+
+function testLens(): { id: string; charge: string } {
+  return { id: "correctness", charge: "correctness of the plan" };
+}
+
+test("[D49] the lens brief states the reply cap, so a lens does not spend it on reasoning", () => {
+  const brief = lensPrompt(testLens() as never, "do the work", "# plan", testQueue(), packMap());
+  assert.match(
+    brief,
+    /ONE message/,
+    "a lens truncated at Unexpected EOF on six attempts across two rounds was never told the " +
+      "reply was bounded",
+  );
+  assert.match(
+    brief,
+    /truncated/i,
+    "and must be told what overrunning costs — the lens is discarded, not partially kept",
+  );
+  assert.match(
+    brief,
+    /reasoning that got you there does not belong/i,
+    "and told what to leave OUT, since a findings list is small and the reasoning is not",
+  );
+});
+
+test("[D49] the lens brief carries the scopable tree, read once for every lens of every round", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "d49-"));
+  const write = (rel: string, body: string): void => {
+    mkdirSync(path.join(root, path.dirname(rel)), { recursive: true });
+    writeFileSync(path.join(root, rel), body);
+  };
+  write("src/moves.py", "def slide_left(row):\n    return row, 0\n");
+  write("README.md", "# not scopable\n");
+
+  const config = testConfig();
+  const files = scopableFiles(root, config);
+  const source = scopableSource(root, files);
+  assert.equal(source.length, files.length, "premise: a repo this small is carried whole");
+
+  const bare = lensPrompt(testLens() as never, "do the work", "# plan", testQueue(), packMap());
+  assert.ok(
+    !bare.includes("def slide_left"),
+    "premise: the brief carries the tree only when the handler passes it",
+  );
+
+  const brief = lensPrompt(
+    testLens() as never,
+    "do the work",
+    "# plan",
+    testQueue(),
+    packMap(),
+    files,
+    source,
+  );
+  assert.match(
+    brief,
+    /def slide_left\(row\)/,
+    "a lens judging whether a plan's steps work must know the code they touch; four lenses " +
+      "fetching it independently is D36's cost times the fan-out width",
+  );
+  assert.ok(!brief.includes("not scopable"), "and nothing behavioralPaths does not own");
+  assert.match(
+    brief,
+    /review from here rather than reading them again/,
+    "the section says why it is there, in the verb of the stage that receives it",
+  );
+
+  rmSync(root, { recursive: true, force: true });
+});

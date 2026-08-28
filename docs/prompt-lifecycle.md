@@ -152,10 +152,12 @@ would have to serialize them anyway, and a shared scope makes the edit gate mean
 
 ### 4.2 PLANNED — `conductor_plan`
 
-Planner again, doctrine `plan.md`: exact paths, bite-sized steps, complete code for
-non-obvious steps, and named placeholder defects — "TBD", "add error handling", "similar to
-task N" are plan defects *by name*. Output is `plan.md` plus decision records (≥2 real
-options scored, §2.7) extracted into `decisions.jsonl`.
+Planner again, doctrine `plan.md`: exact paths, bite-sized steps, complete code only where
+the item's `acceptance` and `testScope` leave a choice open, and named placeholder defects —
+"TBD", "add error handling", "similar to task N" are plan defects *by name*. The brief
+carries the scopable tree the way the decompose brief does, and states that the reply is one
+capped message. Output is `plan.md` plus decision records (≥2 real options scored, §2.7)
+extracted into `decisions.jsonl`.
 
 ### 4.3 PLAN_REVIEWED — `conductor_plan_review`
 
