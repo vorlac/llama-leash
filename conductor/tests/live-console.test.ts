@@ -448,15 +448,18 @@ test("[console-compaction] an inject followed by another inject for the same ses
 // [console-cost] tokens and latency, joined from the router ledger
 // ===========================================================================
 
-test("[console-cost] per-turn tokens and upstream latency are joined from the router ledger by role within the run's group, an absent or unreadable ledger degrades to a timeline with no cost column, and no ledger record is attributed to a turn of a different role", () => {
+test("[console-cost] per-turn tokens and upstream latency are joined from the run's WINDOW of the router ledger by role, an absent or unreadable ledger degrades to a timeline with no cost column, and no ledger record is attributed to a turn of a different role", () => {
   const ledger: LedgerEntry[] = [
-    // A different cell's traffic, in the same append-only file and ahead of this
-    // run's — placed first on purpose: the join walks a role's entries in order,
-    // so a group filter that let this through would hand it to turn one.
-    { group: "/other/repo", role: "orchestrator", promptTokens: 1, completionTokens: 1, upstreamMs: 1, status: 200 },
-    { group: "/repo", role: "orchestrator", promptTokens: 2539, completionTokens: 235, upstreamMs: 73838, status: 200 },
-    { group: "/repo", role: "skeptic", promptTokens: 13352, completionTokens: 350, upstreamMs: 24605, status: 200 },
-    { group: "/repo", role: "orchestrator", promptTokens: 10415, completionTokens: 309, upstreamMs: 77504, status: 200 },
+    // A PRIOR run's traffic under the SAME group path — the work root is
+    // byte-identical across runs of one task, so only the completion stamp can
+    // exclude it. Placed first on purpose: the join walks a role's entries in
+    // order, so a window that let this through would hand it to turn one.
+    { group: "/repo", role: "orchestrator", promptTokens: 7, completionTokens: 7, upstreamMs: 7, status: 200, completedAtMs: T0 - 86_400_000 },
+    // A DIFFERENT run interleaved in time: inside the window, foreign group.
+    { group: "/other/repo", role: "orchestrator", promptTokens: 1, completionTokens: 1, upstreamMs: 1, status: 200, completedAtMs: T0 + 1000 },
+    { group: "/repo", role: "orchestrator", promptTokens: 2539, completionTokens: 235, upstreamMs: 73838, status: 200, completedAtMs: T0 + 1500 },
+    { group: "/repo", role: "skeptic", promptTokens: 13352, completionTokens: 350, upstreamMs: 24605, status: 200, completedAtMs: T0 + 3500 },
+    { group: "/repo", role: "orchestrator", promptTokens: 10415, completionTokens: 309, upstreamMs: 77504, status: 200, completedAtMs: T0 + 4500 },
   ];
   const records = [
     record(0, "state", "run.created", { runId: "r-test", root: "/repo" }, { sessionID: SES }),
@@ -474,7 +477,8 @@ test("[console-cost] per-turn tokens and upstream latency are joined from the ro
       ["skeptic", 13352, 350, 24605],
       ["orchestrator", 10415, 309, 77504],
     ],
-    "each role's turns take that role's ledger records in order; the other cell's group is not this run's cost",
+    "each role's turns take that role's WINDOWED ledger records in order; a prior run's row under " +
+      "the same group and another run's interleaved row are neither of them this run's cost",
   );
   assert.equal(view.promptTokensTotal, 2539 + 13352 + 10415);
   assert.equal(view.completionTokensTotal, 235 + 350 + 309);
@@ -491,15 +495,70 @@ test("[console-cost] per-turn tokens and upstream latency are joined from the ro
   // More turns than the ledger has records for that role: the surplus turns
   // simply carry no cost.
   // Fewer entries than turns: the join fills from the run's FIRST request
-  // forward and the surplus turns keep null. The ledger carries no timestamp, so
-  // order within the group is the only correspondence there is.
-  const short = deriveLiveConsole({ records, ledger: [ledger[1]] });
+  // forward and the surplus turns keep null — a live run's newest request has
+  // no ledger row yet, and that is a tail, not a gap.
+  const short = deriveLiveConsole({ records, ledger: [ledger[2]] });
   assert.deepEqual(short.turns.map((turn) => turn.promptTokens), [2539, null, null]);
+});
+
+test("[console-window] token totals are a direct sum over the rows completed inside the run's own journal span — a prior run's rows under the same group path contribute nothing, a row completing within the 60 s tail grace still counts, and a null-token row is reported as unknown rather than as zero", () => {
+  const records = [
+    record(0, "state", "run.created", { runId: "r-test", root: "/repo" }, { sessionID: SES }),
+    inject(1, "orchestrator"),
+    allow(2, "read"),
+    record(3, "inject", "system-append", { role: "reviewer" }, { sessionID: "ses_r1" }),
+    record(60, "fanout", "subsession.complete", { ok: true }, { sessionID: "ses_r1" }),
+  ];
+  const lastTs = T0 + 60_000;
+  const ledger: LedgerEntry[] = [
+    // The same task's PRIOR run: byte-identical group, completed a day earlier.
+    // This is the row that manufactured the phantom 45,812-token reasoning gap.
+    { group: "/repo", role: "orchestrator", promptTokens: 10_700, completionTokens: 701, upstreamMs: 9000, status: 200, completedAtMs: T0 - 86_400_000 },
+    { group: "/repo", role: "orchestrator", promptTokens: 10_700, completionTokens: 305, upstreamMs: 9000, status: 200, completedAtMs: T0 + 2000 },
+    // The c828 tail shape: a request in flight when the final journal record
+    // lands completes after it — 511 tokens, 139 ms past the last timestamp.
+    { group: "/repo", role: "testWriter", promptTokens: 35_888, completionTokens: 511, upstreamMs: 36_114, status: 200, completedAtMs: lastTs + 139 },
+    // Past the 60 s grace (LEDGER_WINDOW_GRACE_MS): the NEXT run's first
+    // request, not this run's tail.
+    { group: "/repo", role: "orchestrator", promptTokens: 9000, completionTokens: 999, upstreamMs: 9000, status: 200, completedAtMs: lastTs + 60_001 },
+    // group=null inside the window: the run's own traffic all the same — the
+    // router records no group for a session with neither worktree nor item id,
+    // which is every reviewer lens.
+    { group: null, role: "reviewer", promptTokens: 20_000, completionTokens: 1200, upstreamMs: 50_000, status: 200, completedAtMs: T0 + 30_000 },
+    // A provider abort: a row with a status and no token counts.
+    { group: null, role: "reviewer", promptTokens: null, completionTokens: null, upstreamMs: 1_800_018, status: 200, completedAtMs: T0 + 40_000 },
+  ];
+
+  const view = deriveLiveConsole({ records, ledger });
+  assert.equal(
+    view.completionTokensTotal,
+    305 + 511 + 1200,
+    "the total is the run's own windowed rows: the prior run's 701 and the next run's 999 are not in it",
+  );
+  assert.equal(view.ledgerUnknownTokenRows, 1, "the aborted request is COUNTED as unknown");
+  assert.deepEqual(
+    view.ledgerRoleTotals,
+    [
+      { role: "orchestrator", requests: 1, promptTokens: 10_700, completionTokens: 305, unknownRows: 0 },
+      { role: "reviewer", requests: 2, promptTokens: 20_000, completionTokens: 1200, unknownRows: 1 },
+      { role: "testWriter", requests: 1, promptTokens: 35_888, completionTokens: 511, unknownRows: 0 },
+    ],
+    "per-role sums a watcher can reconcile against llama-server's own predicted_n",
+  );
+
+  const text = renderConsole(view, { runId: "r-1", runState: "EXECUTING" });
+  assert.match(text, /\+1 rows unknown/, "the unknown row is named beside the total, never zeroed into it");
+  assert.match(
+    text,
+    /per-role out: orchestrator 305 \(1 req\)  reviewer 1200 \(2 req, 1 unknown\)  testWriter 511 \(1 req\)/,
+    "and the console prints the per-role sums, which are the live cost signal a watcher reads",
+  );
 });
 
 test("[console-ledger-shape] ledgerEntriesOf coerces the router's own record shape and drops nothing it can read, and readLedgerFile answers [] for a path that is not there", () => {
   const entries = ledgerEntriesOf([
     {
+      completedAt: "2026-08-28T09:01:54.360+00:00",
       completionTokens: 64,
       group: "g5",
       model: "ornith",
@@ -512,8 +571,18 @@ test("[console-ledger-shape] ledgerEntriesOf coerces the router's own record sha
     { completionTokens: null, group: "/repo", promptTokens: null, role: "orchestrator", status: 400, timings: null, upstreamMs: 16213 },
   ]);
   assert.deepEqual(entries, [
-    { group: "g5", role: null, promptTokens: 17, completionTokens: 64, upstreamMs: 1041, status: 200 },
-    { group: "/repo", role: "orchestrator", promptTokens: null, completionTokens: null, upstreamMs: 16213, status: 400 },
+    {
+      group: "g5",
+      role: null,
+      promptTokens: 17,
+      completionTokens: 64,
+      upstreamMs: 1041,
+      status: 200,
+      completedAtMs: Date.parse("2026-08-28T09:01:54.360+00:00"),
+    },
+    // A row with no completion stamp keeps null — it predates the router's
+    // `completedAt` field, and no run can claim it.
+    { group: "/repo", role: "orchestrator", promptTokens: null, completionTokens: null, upstreamMs: 16213, status: 400, completedAtMs: null },
   ]);
   assert.deepEqual(
     readLedgerFile(path.join(freshDir(), "no-such-metrics.jsonl")),
@@ -891,14 +960,15 @@ test("[console-stall-banner-kind] the banner labels WHAT advanced: an FSM state 
 // [console-cost] a total the join cannot vouch for is not printed bare
 // ===========================================================================
 
-test("[console-cost-partial] a role whose group-tagged ledger entries are FEWER than its settled turns has its whole cost column withheld and the header says PARTIAL — the positional join shifts every later row of that role by one, so the alternative is printing one turn's tokens against another turn's row", () => {
-  // The preserved cell's exact shape: adapter/inject.ts groupOf emits no group
-  // header for a sub-session with neither a worktree nor an item id, so the
-  // router records those requests untagged and the filter drops them.
+test("[console-cost-partial] a role whose WINDOWED ledger entries are FEWER than its settled turns has its whole per-turn cost column withheld and the header says PARTIAL — the positional join shifts every later row of that role by one, so the alternative is printing one turn's tokens against another turn's row", () => {
+  // The c828 shape: the skeptic's first request belongs to a PRIOR run — same
+  // group path, completed a day earlier. A join that accepted it would both
+  // rescue the shortfall and attribute yesterday's numbers to today's turn; the
+  // window drops it, the shortfall stands, and the column is withheld.
   const ledger: LedgerEntry[] = [
-    { group: "/repo", role: "orchestrator", promptTokens: 2539, completionTokens: 235, upstreamMs: 73838, status: 200 },
-    { group: null, role: "skeptic", promptTokens: 12039, completionTokens: 415, upstreamMs: 82700, status: 200 },
-    { group: "/repo", role: "skeptic", promptTokens: 13352, completionTokens: 350, upstreamMs: 24605, status: 200 },
+    { group: "/repo", role: "skeptic", promptTokens: 12039, completionTokens: 415, upstreamMs: 82700, status: 200, completedAtMs: T0 - 86_400_000 },
+    { group: "/repo", role: "orchestrator", promptTokens: 2539, completionTokens: 235, upstreamMs: 73838, status: 200, completedAtMs: T0 + 2000 },
+    { group: "/repo", role: "skeptic", promptTokens: 13352, completionTokens: 350, upstreamMs: 24605, status: 200, completedAtMs: T0 + 4500 },
   ];
   const records = [
     record(0, "state", "run.created", { runId: "r-test", root: "/repo" }, { sessionID: SES }),
@@ -918,22 +988,27 @@ test("[console-cost-partial] a role whose group-tagged ledger entries are FEWER 
       ["skeptic", null],
       ["skeptic", null],
     ],
-    "the orchestrator's join is complete and stands; the skeptic's is one entry short of its settled " +
-      "turns, and a short join is a SHIFTED join — every row would carry the next request's numbers",
+    "the orchestrator's join is complete and stands; the skeptic's window is one entry short of its " +
+      "settled turns, and a short join is a SHIFTED join — every row would carry the next request's numbers",
   );
   assert.deepEqual(
     view.ledgerPartialRoles,
     ["skeptic"],
     "and the role whose cost was withheld is named, so the gap is attributable rather than mysterious",
   );
-  assert.equal(view.promptTokensTotal, 2539, "the total counts only what was actually attributed");
+  assert.equal(
+    view.promptTokensTotal,
+    2539 + 13352,
+    "the TOTAL is a direct sum over the run's windowed rows — withholding the per-turn column must " +
+      "not subtract the skeptic's real cost from the run, and the prior run's row must not add its own",
+  );
 
   const text = renderConsole(view, { runId: "r-1", runState: "EXECUTING" });
   assert.match(
     text,
     /PARTIAL/,
-    "and the header says the total is partial, because 308367 printed bare was 7.3% under the truth " +
-      "with nothing on screen to say so",
+    "and the header says the per-turn column is partial, because a bare column printed against " +
+      "shifted rows would attribute one turn's tokens to another",
   );
   assert.match(text, /skeptic/, "naming the role whose requests the ledger could not attribute");
 });

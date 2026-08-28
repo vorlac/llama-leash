@@ -795,9 +795,19 @@ def trend_rows(epochs: Sequence[Tuple[str, Dict[Tuple[str, str], dict]]]) -> Lis
     This is the only view that answers what CHANGED. A per-epoch document can say
     a cell timed out; only the row across epochs says it has timed out four times
     and got slower each time.
+
+    Keyed on `startedIso`: a results directory holding a cell JSON is
+    conductor_bench's resume ledger, so a later epoch can carry an earlier
+    epoch's cell file byte for byte — the grid2048 baseline and doctrine cells
+    appear in four step directories with one startedIso between them. A cell
+    whose every record was already claimed by an earlier epoch renders as
+    `=<that epoch>`, never as a fresh verdict.
     """
     rows: Dict[Tuple[str, str], TrendRow] = {}
     order: List[Tuple[str, str]] = []
+    # startedIso stamps already rendered, per (task, arm), mapped to the label
+    # of the epoch that measured them.
+    claimed: Dict[Tuple[str, str], Dict[str, str]] = {}
     for label, results in epochs:
         for (arm, task), record in results.items():
             key = (task, arm)
@@ -807,7 +817,26 @@ def trend_rows(epochs: Sequence[Tuple[str, Dict[Tuple[str, str], dict]]]) -> Lis
             # One record or a list of them: the trend table is the only caller
             # that keeps repetitions, and both spellings reach it.
             batch = record if isinstance(record, list) else [record]
-            rows[key].cells[label] = trend_cell_many(batch)
+            stamps = claimed.setdefault(key, {})
+            fresh: List[dict] = []
+            carried: List[str] = []
+            for rec in batch:
+                stamp = rec.get("startedIso") if isinstance(rec, dict) else None
+                if isinstance(stamp, str) and stamp:
+                    if stamp in stamps:
+                        carried.append(stamps[stamp])
+                        continue
+                    stamps[stamp] = label
+                # A record with no startedIso cannot be deduplicated and is
+                # rendered as what it claims to be.
+                fresh.append(rec)
+            if fresh:
+                cell = trend_cell_many(fresh)
+                if carried:
+                    cell += " (+%d carried)" % len(carried)
+            else:
+                cell = "=%s" % sorted(set(carried))[0]
+            rows[key].cells[label] = cell
     return [rows[key] for key in sorted(order)]
 
 

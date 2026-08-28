@@ -5576,3 +5576,55 @@ class VerifyTimeoutIsNotTheCellBudget(unittest.TestCase):
         """Three orders of magnitude over any measured suite, and far under a cell."""
         self.assertGreaterEqual(cb.VERIFY_TIMEOUT_MS, 60_000)
         self.assertLessEqual(cb.VERIFY_TIMEOUT_MS, 1_800_000)
+
+
+class TrendTableDeduplicatesCarriedCells(unittest.TestCase):
+    """[D-rank6] the cross-epoch trend table keys on startedIso.
+
+    A results directory holding a cell JSON is conductor_bench's resume ledger,
+    and the grid2048 baseline/doctrine cells were carried byte-for-byte through
+    four step directories — one measurement, four PASS rows in INDEX.md. The
+    table must render a carried cell as a reference to the epoch that measured
+    it, never as a fresh verdict.
+    """
+
+    def _er(self):
+        import epoch_review as er
+        return er
+
+    def test_a_carried_cell_renders_as_a_reference_not_a_fresh_verdict(self):
+        er = self._er()
+        measured = {("baseline", "grid2048-headless-py"): {
+            "passed": True, "timedOut": False, "wallClockMs": 1_213_698,
+            "tokens": {"completion": 16_685},
+            "startedIso": "2026-08-27T04:37:12Z",
+        }}
+        carried = {("baseline", "grid2048-headless-py"): dict(
+            measured[("baseline", "grid2048-headless-py")])}
+        rows = er.trend_rows([("step4", measured), ("step5", carried)])
+        self.assertEqual(len(rows), 1)
+        cells = rows[0].cells
+        self.assertIn("PASS", cells["step4"], "the epoch that measured it keeps its verdict")
+        self.assertEqual(
+            cells["step5"], "=step4",
+            "the epoch that merely carried the file points at the measurement "
+            "instead of repeating it as a fresh PASS")
+
+    def test_a_record_with_a_new_startedIso_is_a_fresh_measurement(self):
+        er = self._er()
+        first = {("baseline", "t"): {
+            "passed": True, "timedOut": False, "wallClockMs": 60_000,
+            "tokens": {"completion": 100}, "startedIso": "2026-08-27T04:00:00Z"}}
+        second = {("baseline", "t"): {
+            "passed": True, "timedOut": False, "wallClockMs": 61_000,
+            "tokens": {"completion": 120}, "startedIso": "2026-08-28T05:00:00Z"}}
+        rows = er.trend_rows([("e1", first), ("e2", second)])
+        self.assertIn("PASS", rows[0].cells["e2"], "a re-run is a fresh verdict, not a reference")
+
+    def test_a_record_without_startedIso_cannot_be_deduplicated_and_stays_a_verdict(self):
+        er = self._er()
+        anon = {("baseline", "t"): {
+            "passed": True, "timedOut": False, "wallClockMs": 60_000,
+            "tokens": {"completion": 100}}}
+        rows = er.trend_rows([("e1", anon), ("e2", dict(anon))])
+        self.assertIn("PASS", rows[0].cells["e2"])

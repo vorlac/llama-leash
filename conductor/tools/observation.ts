@@ -462,6 +462,10 @@ export function crossedThresholds(signals: StrainSignals): string[] {
 
 // One record of the router's per-request ledger, coerced. The C++ router writes
 // far more per request; these are the fields a per-turn cost column needs.
+// `completedAtMs` is the row's own completion instant, and it is the field that
+// says WHICH run a row belongs to: the file is global and append-only across
+// every run, and `group` is a work-root path that is byte-identical across runs
+// of the same task.
 export interface LedgerEntry {
   group: string | null;
   role: string | null;
@@ -469,6 +473,7 @@ export interface LedgerEntry {
   completionTokens: number | null;
   upstreamMs: number | null;
   status: number | null;
+  completedAtMs: number | null;
 }
 
 // What a gate record says happened to the call. "none" is a turn whose session
@@ -611,6 +616,17 @@ export interface WaitingOn {
   waitingMs: number | null;
 }
 
+// Direct per-role sums over the run's windowed ledger rows. `unknownRows`
+// counts rows whose token fields the router recorded as null — a provider abort
+// has a row and no count, and rendering it as zero would read as free.
+export interface LedgerRoleTotal {
+  role: string;
+  requests: number;
+  promptTokens: number;
+  completionTokens: number;
+  unknownRows: number;
+}
+
 export interface LiveConsole {
   runRoot: string | null;
   firstTsMs: number | null;
@@ -625,12 +641,18 @@ export interface LiveConsole {
   refusalCount: number;
   compactionCount: number;
   compactionMs: number;
+  // Direct sums over the run's windowed ledger rows — never a sum over the
+  // joined turns, so an unjoinable turn cannot silently subtract its cost and a
+  // prior run's rows cannot add theirs.
   promptTokensTotal: number;
   completionTokensTotal: number;
+  ledgerRoleTotals: LedgerRoleTotal[];
+  // Windowed rows whose token fields are null. Rendered as unknown, never as a
+  // zero that reads as free.
+  ledgerUnknownTokenRows: number;
   ledgerJoined: boolean;
-  // The roles whose cost the ledger could not account for, so the totals above
-  // are a floor rather than a figure. Empty when every role's traffic was
-  // attributable.
+  // The roles whose PER-TURN cost column the positional join had to withhold.
+  // The totals above are direct sums and do not depend on the join.
   ledgerPartialRoles: string[];
   malformedRecords: number;
   malformedBytes: number;
@@ -758,7 +780,14 @@ export function ledgerEntriesOf(values: readonly Record<string, unknown>[]): Led
     completionTokens: numOrNull(value["completionTokens"]),
     upstreamMs: numOrNull(value["upstreamMs"]),
     status: numOrNull(value["status"]),
+    completedAtMs: isoMsOrNull(value["completedAt"]),
   }));
+}
+
+function isoMsOrNull(value: unknown): number | null {
+  if (typeof value !== "string" || value === "") return null;
+  const ms = Date.parse(value);
+  return Number.isFinite(ms) ? ms : null;
 }
 
 /** Which band a stall has escalated into. */
@@ -998,18 +1027,39 @@ export function deriveLiveConsole(input: LiveConsoleInput): LiveConsole {
   }
 
   const turns = builds.map((build) => build.row);
-  const join = joinLedger(turns, input.ledger ?? [], runRoot);
+  const windowed = windowLedger(input.ledger ?? [], firstTsMs, latestTsMs);
+  const join = joinLedger(turns, windowed, runRoot);
 
-  let promptTokensTotal = 0;
-  let completionTokensTotal = 0;
   let ledgerJoined = false;
   for (const row of turns) {
     if (row.promptTokens !== null || row.completionTokens !== null || row.upstreamMs !== null) {
       ledgerJoined = true;
     }
-    promptTokensTotal += row.promptTokens ?? 0;
-    completionTokensTotal += row.completionTokens ?? 0;
   }
+
+  const roleAgg = new Map<string, LedgerRoleTotal>();
+  let promptTokensTotal = 0;
+  let completionTokensTotal = 0;
+  let ledgerUnknownTokenRows = 0;
+  for (const entry of windowed) {
+    if (entry.role === null || !isRunTraffic(entry, runRoot)) continue;
+    let agg = roleAgg.get(entry.role);
+    if (agg === undefined) {
+      agg = { role: entry.role, requests: 0, promptTokens: 0, completionTokens: 0, unknownRows: 0 };
+      roleAgg.set(entry.role, agg);
+    }
+    agg.requests += 1;
+    if (entry.promptTokens === null && entry.completionTokens === null) {
+      agg.unknownRows += 1;
+      ledgerUnknownTokenRows += 1;
+    } else {
+      agg.promptTokens += entry.promptTokens ?? 0;
+      agg.completionTokens += entry.completionTokens ?? 0;
+      promptTokensTotal += entry.promptTokens ?? 0;
+      completionTokensTotal += entry.completionTokens ?? 0;
+    }
+  }
+  const ledgerRoleTotals = [...roleAgg.values()].sort((a, b) => a.role.localeCompare(b.role));
 
   return {
     runRoot,
@@ -1027,6 +1077,8 @@ export function deriveLiveConsole(input: LiveConsoleInput): LiveConsole {
     compactionMs,
     promptTokensTotal,
     completionTokensTotal,
+    ledgerRoleTotals,
+    ledgerUnknownTokenRows,
     ledgerJoined,
     ledgerPartialRoles: join.partialRoles,
     malformedRecords: input.malformedRecords ?? 0,
@@ -1240,38 +1292,75 @@ function outcomeOfSettlement(
   return "failed";
 }
 
+// How far past the journal's last record a ledger row may complete and still
+// belong to the run. A request in flight when the final journal record lands
+// completes after it: the c828 run's last ledger row (testWriter, 511 completion
+// tokens) completed 139 ms past the journal's last timestamp, and a strict
+// window loses exactly those tokens.
+export const LEDGER_WINDOW_GRACE_MS = 60_000;
+
 /**
- * Per-turn tokens and latency, from the router's append-only ledger.
+ * The rows of the global ledger that belong to THIS run: completed inside the
+ * run's own journal span, padded by the grace at the tail. The lower bound takes
+ * no grace — a run's first request cannot complete before its journal begins.
+ * A row with no completion stamp cannot be attributed to any run and is
+ * excluded; every such row on disk predates the router's `completedAt` field,
+ * which also makes it a prior run's traffic.
+ */
+function windowLedger(
+  ledger: readonly LedgerEntry[],
+  firstTsMs: number | null,
+  latestTsMs: number | null,
+): LedgerEntry[] {
+  if (firstTsMs === null || latestTsMs === null) return [];
+  const hi = latestTsMs + LEDGER_WINDOW_GRACE_MS;
+  return ledger.filter(
+    (entry) =>
+      entry.completedAtMs !== null && entry.completedAtMs >= firstTsMs && entry.completedAtMs <= hi,
+  );
+}
+
+// Whether a windowed row is this run's own traffic. The window is the primary
+// key; the group is a secondary guard against a DIFFERENT run interleaved in
+// time. A null group is the run's own traffic all the same — the router records
+// no group whenever the session had neither a worktree nor an item id
+// (adapter/inject.ts groupOf), which is the ordinary shape of a reviewer lens or
+// a planning-phase mechanical session, so filtering nulls out would drop whole
+// roles. And with no run root on record there is nothing to compare against, so
+// the window alone decides.
+function isRunTraffic(entry: LedgerEntry, runRoot: string | null): boolean {
+  return runRoot === null || entry.group === null || entry.group === runRoot;
+}
+
+/**
+ * Per-turn tokens and latency, from the run's WINDOW of the router's
+ * append-only ledger — the caller has already cut the global file down to the
+ * rows completed inside this run's journal span.
  *
- * The ledger carries no timestamp and no run id, so the join is POSITIONAL: the
- * run's own traffic is the entries whose `group` is the run root, and within
- * that, a role's Nth request is that role's Nth turn. Per role rather than
- * globally, because a wave's sub-session requests interleave with the
- * orchestrator's in the ledger exactly as they do in the journal.
+ * Within the window the join is POSITIONAL: a role's Nth request is that role's
+ * Nth turn. Per role rather than globally, because a wave's sub-session
+ * requests interleave with the orchestrator's in the ledger exactly as they do
+ * in the journal.
  *
  * Positional means FRAGILE, and the fragility is one-directional: every request
  * the filter drops shifts that role's remaining turns by one, so a role short of
- * entries is a role whose every printed cost belongs to a different turn. The
- * router records a request with no group at all whenever the session had neither a
- * worktree nor an item id (adapter/inject.ts groupOf), which is the ordinary shape
- * of a planning-phase mechanical or skeptic session — so the shortfall is not a
- * hypothetical.
+ * entries is a role whose every printed cost belongs to a different turn.
  *
- * The rule here is therefore: a role gets its cost column only when the group
+ * The rule here is therefore: a role gets its cost column only when the window
  * carries at least one entry per SETTLED turn of that role. A role that does not
- * is named in `partialRoles` and gets nothing, and the caller prints the total as
- * partial. A turn beyond the entries at the tail of a covered role keeps null —
- * that is a live run's newest request, not a gap.
+ * is named in `partialRoles` and gets nothing, and the caller prints the per-turn
+ * column as partial. A turn beyond the entries at the tail of a covered role
+ * keeps null — that is a live run's newest request, not a gap.
  */
 function joinLedger(
   turns: readonly TurnRow[],
   ledger: readonly LedgerEntry[],
   runRoot: string | null,
 ): { partialRoles: string[] } {
-  if (ledger.length === 0 || runRoot === null) return { partialRoles: [] };
+  if (ledger.length === 0) return { partialRoles: [] };
   const byRole = new Map<string, LedgerEntry[]>();
   for (const entry of ledger) {
-    if (entry.group !== runRoot) continue;
+    if (!isRunTraffic(entry, runRoot)) continue;
     const role = entry.role;
     if (role === null) continue;
     const bucket = byRole.get(role);

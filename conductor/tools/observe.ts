@@ -473,15 +473,34 @@ export function renderConsole(view: LiveConsole, meta: ConsoleMeta): string {
   const costCaveat = view.ledgerJoined
     ? view.ledgerPartialRoles.length === 0
       ? ""
-      : `  (PARTIAL — ${view.ledgerPartialRoles.join(", ")}: the router ledger holds fewer ` +
-        "group-tagged requests than these roles took turns, so their cost is withheld rather " +
+      : `  (PARTIAL — ${view.ledgerPartialRoles.join(", ")}: the run's ledger window holds fewer ` +
+        "requests than these roles took turns, so their per-turn cost is withheld rather " +
         "than shifted onto the wrong rows)"
     : "  (no router ledger joined — no cost column)";
+  // Rows the router wrote with no token counts — a provider abort has a row and
+  // no count. Named beside the totals so the figure reads as a floor, never as
+  // "those requests were free".
+  const unknownRows =
+    view.ledgerUnknownTokenRows === 0
+      ? ""
+      : ` (+${String(view.ledgerUnknownTokenRows)} rows unknown)`;
   lines.push(
     `COMPACTION suspected ${String(view.compactionCount)} costing ${humanMs(view.compactionMs)}  ` +
       `tokens ${String(view.promptTokensTotal)} in / ${String(view.completionTokensTotal)} out` +
+      unknownRows +
       costCaveat,
   );
+  if (view.ledgerRoleTotals.length > 0) {
+    lines.push(
+      "per-role out: " +
+        view.ledgerRoleTotals
+          .map((total) => {
+            const unknown = total.unknownRows === 0 ? "" : `, ${String(total.unknownRows)} unknown`;
+            return `${total.role} ${String(total.completionTokens)} (${String(total.requests)} req${unknown})`;
+          })
+          .join("  "),
+    );
+  }
   if (view.malformedRecords > 0) {
     lines.push(
       `malformed journal regions skipped: ${String(view.malformedRecords)} ` +
