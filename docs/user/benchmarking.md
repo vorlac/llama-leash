@@ -402,7 +402,8 @@ Each set is its own campaign, and the corpus is covered only when all six have r
 | [`bench/corpus-repair.json`](../../bench/corpus-repair.json) | 5 | debugging and migration repairs drawn from the task corpus |
 | [`bench/corpus-systems.json`](../../bench/corpus-systems.json) | 4 | systems-implementation tasks whose gauges are the conformance suites above |
 | [`bench/corpus-perf.json`](../../bench/corpus-perf.json) | 3 | speed gates, where the hidden test is a wall clock |
-| [`bench/corpus-games.json`](../../bench/corpus-games.json) | 2 | headless TUI games driven through a scripted input tape |
+| [`bench/corpus-games.json`](../../bench/corpus-games.json) | 3 | TUI games: two headless, driven through a scripted input tape, and one built from scratch in C++ and driven through a pseudo-terminal |
+| [`bench/corpus-snake-ladder.json`](../../bench/corpus-snake-ladder.json) | 6 | one C++ Snake in six rungs, each sized under the measured one-response delivery window |
 
 The report a run writes describes the manifest it was given. A whole-manifest run states
 that it covered the whole declared task set, which is true of that set and says nothing

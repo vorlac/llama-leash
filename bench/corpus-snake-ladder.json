@@ -1,0 +1,232 @@
+{
+  "version": 1,
+  "selectionCriteria": {
+    "provenance": "Six rungs over ONE specification, under bench/corpus/tui-games/snake-cpp-ladder/. The seeds are GENERATED from a single reference by build-ladder.py, each by replacing exactly one concern with a stub that still compiles, so the five modules a rung does not ask about are byte-identical across every rung. The reference is validated against the specification's own pins and passes all six gauges.",
+    "whyALadder": "Epoch 24 asked for the whole program behind one specification and no arm wrote a line: every generation ran past the 1,800 s delivery window and was discarded whole (D60). At the served ~15 tok/s that window is about 27,000 tokens, and at epoch 23's measured 89.8% reasoning share the deliverable half of one response is roughly 2,700 tokens - on the order of 180 lines of C++. Every rung here is sized under that. The ladder is the answer to a measurement, not a preference.",
+    "whatIsMeasured": "Rungs 2 to 5 are graded by the full 36-check gauge, which is honest because the seeds are cumulative: with five modules given and correct, passing the whole gauge is exactly the claim that the sixth is right. Rung 1 has its own five checks, because nothing else exists yet to grade. Rung 6 is the only one whose discriminating checks drive a pseudo-terminal.",
+    "whereTheFreedomIs": "Rungs 1 and 6 are where the approach is chosen: the layout and the build system in rung 1, raw escapes against a curses library in rung 6. Rungs 2 to 5 hand over a layout and measure execution inside it. That is a real loss against a single from-scratch task and it is the price of fitting the delivery window; it is recorded here rather than presented as a design preference.",
+    "seedIsGreen": "Rungs 2 to 6 build and pass their own visible suite on arrival - one smoke test over `--version`, which every seed already answers - so a red visible test is the arm's doing. Rung 1 starts RED and cannot do otherwise: its visible suite builds first and there is no build.sh yet, which is the honest state of an empty tree.",
+    "calibration": "Every seed FAILS its own gauge and the reference PASSES all six. Failure counts on arrival, which grade with how much a rung removes: L1 5 of 5, L2 18 of 36, L3 21, L4 24, L5 27, L6 10 of 36 - rung 6's headless half is complete, so only the seven pseudo-terminal checks and what they touch can fail.",
+    "languageMix": "cpp only."
+  },
+  "defaults": {
+    "model": "llamacpp/qwen3.8-27b",
+    "tierTimeoutSec": {
+      "T0": 1800,
+      "T1": 3600,
+      "T2": 5400,
+      "T3": 7200,
+      "T4": 3600
+    }
+  },
+  "expectedTaskCounts": {
+    "T0": 0,
+    "T1": 5,
+    "T2": 1,
+    "T3": 0,
+    "T4": 0
+  },
+  "sweep": {
+    "rationale": "One model, because one model is served. Five T1 rungs and one T2.",
+    "primaryModel": "llamacpp/qwen3.8-27b",
+    "models": [
+      "llamacpp/qwen3.8-27b"
+    ],
+    "sweptTiers": [
+      "T1",
+      "T2"
+    ],
+    "primaryOnlyTiers": [
+      "T0",
+      "T3",
+      "T4"
+    ],
+    "capabilities": [
+      "none"
+    ],
+    "reps": 3
+  },
+  "tasks": [
+    {
+      "id": "snake-l1-bootstrap",
+      "tier": "T1",
+      "mechanism": "none",
+      "expectedTrajectory": "one concern, one or two items; the run should not need a wave to carry it",
+      "expectedStopKinds": [
+        "done",
+        "REPORTED"
+      ],
+      "language": "cpp",
+      "difficulty": "one-function",
+      "behavioral": true,
+      "rationale": "The bootstrap rung: a build and a program that answers, from an empty tree. This is where the layout and the build system are CHOSEN rather than inherited, and it is deliberately the smallest rung so that choice fits inside one response.",
+      "prompt": "This workspace holds `SPEC.md` and nothing else. Build the smallest thing the specification's outside demands, and no more:\n\n- `./build.sh` at the root, executable, takes no arguments, exits 0, and leaves an executable `./snake`. It must work twice in a row.\n- `./snake --version` prints `tui-snake/1` and exits 0.\n\nDo NOT implement the game. No rules, no generator, no replay, no terminal mode \u2014 a later task adds each of those over what you write here. What is wanted now is a tree that builds and a binary that runs.\n\nThe layout, the build system and the file names are yours: one translation unit compiled by one `c++` invocation satisfies this as fully as a CMake project. Put your sources under `src/`.\n\nThe machine has Apple Clang with C++23, CMake, Ninja and the system ncurses (`-lncurses`, `<curses.h>`). There is no network, so a dependency fetched at build time will fail the build.\n\n`tools/run_tests.sh` builds and then runs every executable directly under `tests/`; it fails when there are no tests at all. The graded run executes the built binary and never reads your source.",
+      "seedDir": "bench/corpus/tui-games/snake-cpp-ladder/L1-bootstrap/seed",
+      "hiddenDir": "bench/corpus/tui-games/snake-cpp-ladder/L1-bootstrap/hidden",
+      "hiddenTestCommand": [
+        "/usr/bin/python3",
+        "gauge/run.py",
+        "gauge"
+      ],
+      "repoTestCommand": [
+        "sh",
+        "tools/run_tests.sh"
+      ],
+      "behavioralPaths": [
+        "src/**",
+        "build.sh"
+      ],
+      "runTimeoutSec": 3600
+    },
+    {
+      "id": "snake-l2-generator",
+      "tier": "T1",
+      "mechanism": "none",
+      "expectedTrajectory": "one concern, one or two items; the run should not need a wave to carry it",
+      "expectedStopKinds": [
+        "done",
+        "REPORTED"
+      ],
+      "language": "cpp",
+      "difficulty": "multi-file",
+      "behavioral": true,
+      "rationale": "One module: the 32-bit generator and the food placement that indexes it.",
+      "prompt": "This workspace holds a working C++ Snake with ONE module removed. `src/rng.hpp` is a stub: `Lcg::next()` returns zero, `freeCells` returns nothing and `placeFood` never places anything, so no game has food in it.\n\nImplement `src/rng.hpp` per SPEC.md section 6:\n\n- the 32-bit linear congruential generator, whose two pinned sequences (seed 1 and seed 42) must reproduce exactly;\n- `freeCells`, the free cells of the playfield in ascending row-major order;\n- `placeFood`, which returns `free[next() % free.size()]` and consumes exactly one draw, or nothing at all when the board is full. Rejection sampling is forbidden: it would consume a seed-dependent number of draws.\n\nRequirement 18 pins the answers: with seed 42 the first food is `(34, 6)`, with seed 1 it is `(25, 6)`, with seed 7 it is `(8, 5)`.\n\nChange nothing else. Every other module is written and correct.\n\nThe machine has Apple Clang with C++23, CMake, Ninja and the system ncurses (`-lncurses`, `<curses.h>`). There is no network, so a dependency fetched at build time will fail the build.\n\n`tools/run_tests.sh` builds and then runs every executable directly under `tests/`; it fails when there are no tests at all. The graded run executes the built binary and never reads your source.",
+      "seedDir": "bench/corpus/tui-games/snake-cpp-ladder/L2-generator/seed",
+      "hiddenDir": "bench/corpus/tui-games/snake-cpp-ladder/L2-generator/hidden",
+      "hiddenTestCommand": [
+        "/usr/bin/python3",
+        "gauge/run.py",
+        "gauge"
+      ],
+      "repoTestCommand": [
+        "sh",
+        "tools/run_tests.sh"
+      ],
+      "behavioralPaths": [
+        "src/**"
+      ],
+      "runTimeoutSec": 3600
+    },
+    {
+      "id": "snake-l3-rules",
+      "tier": "T1",
+      "mechanism": "none",
+      "expectedTrajectory": "one concern, one or two items; the run should not need a wave to carry it",
+      "expectedStopKinds": [
+        "done",
+        "REPORTED"
+      ],
+      "language": "cpp",
+      "difficulty": "multi-file",
+      "behavioral": true,
+      "rationale": "One function: the tick, with its wall, self, growth and win cases.",
+      "prompt": "This workspace holds a working C++ Snake with ONE function removed. `Game::tick()` in `src/game.hpp` has an empty body, so the game never advances: every replay reports the initial state whatever its script says.\n\nImplement `tick()` per SPEC.md section 7, requirements 22 to 27. In order: it does nothing at all when the status is not `alive` or the game is paused (the tick counter does not advance); otherwise commit the pending direction, compute the new head, increment the tick counter, test collisions, then apply growth or the ordinary move.\n\nThe two cases that are easy to get wrong are named in the specification. A wall or self collision does NOT move the snake and the tick still counts. The tail is excluded from the self-collision test only when the snake is not growing, so moving into the cell the tail vacates on the same tick is legal.\n\nChange nothing else \u2014 the constructor, `turn`, `pause`, `restart` and every other module are written and correct.\n\nThe machine has Apple Clang with C++23, CMake, Ninja and the system ncurses (`-lncurses`, `<curses.h>`). There is no network, so a dependency fetched at build time will fail the build.\n\n`tools/run_tests.sh` builds and then runs every executable directly under `tests/`; it fails when there are no tests at all. The graded run executes the built binary and never reads your source.",
+      "seedDir": "bench/corpus/tui-games/snake-cpp-ladder/L3-rules/seed",
+      "hiddenDir": "bench/corpus/tui-games/snake-cpp-ladder/L3-rules/hidden",
+      "hiddenTestCommand": [
+        "/usr/bin/python3",
+        "gauge/run.py",
+        "gauge"
+      ],
+      "repoTestCommand": [
+        "sh",
+        "tools/run_tests.sh"
+      ],
+      "behavioralPaths": [
+        "src/**"
+      ],
+      "runTimeoutSec": 3600
+    },
+    {
+      "id": "snake-l4-script",
+      "tier": "T1",
+      "mechanism": "none",
+      "expectedTrajectory": "one concern, one or two items; the run should not need a wave to carry it",
+      "expectedStopKinds": [
+        "done",
+        "REPORTED"
+      ],
+      "language": "cpp",
+      "difficulty": "multi-file",
+      "behavioral": true,
+      "rationale": "One module: the directive parser and the replay that applies it.",
+      "prompt": "This workspace holds a working C++ Snake with ONE module removed. `src/script.hpp` is a stub: every script parses to nothing and a replay applies no directive, so the headless mode always reports a fresh game.\n\nImplement `src/script.hpp` per SPEC.md sections 8 and the replay rules that follow:\n\n- `parseScript`, which turns the text into directives. Blank lines and lines whose first non-whitespace character is `#` are ignored. The tokens are exactly `UP`, `DOWN`, `LEFT`, `RIGHT`, `PAUSE`, `QUIT`, `RESTART` and `TICK`, case-sensitive, and only `TICK` takes a count. An unknown token, a count on a token that takes none, and a `TICK` count that is not a positive decimal integer are each a hard error.\n- `replay`, which applies the directives to a game. `QUIT` stops immediately and sets the status to `quit` only if the game was still alive; directives after it are not applied. After the game ends, `TICK`s are consumed and ignored.\n\nA script error must make the program exit 3 with nothing on stdout; `src/main.cpp` already does that when `replay` returns false, so return false and set the message.\n\nChange nothing else.\n\nThe machine has Apple Clang with C++23, CMake, Ninja and the system ncurses (`-lncurses`, `<curses.h>`). There is no network, so a dependency fetched at build time will fail the build.\n\n`tools/run_tests.sh` builds and then runs every executable directly under `tests/`; it fails when there are no tests at all. The graded run executes the built binary and never reads your source.",
+      "seedDir": "bench/corpus/tui-games/snake-cpp-ladder/L4-script/seed",
+      "hiddenDir": "bench/corpus/tui-games/snake-cpp-ladder/L4-script/hidden",
+      "hiddenTestCommand": [
+        "/usr/bin/python3",
+        "gauge/run.py",
+        "gauge"
+      ],
+      "repoTestCommand": [
+        "sh",
+        "tools/run_tests.sh"
+      ],
+      "behavioralPaths": [
+        "src/**"
+      ],
+      "runTimeoutSec": 3600
+    },
+    {
+      "id": "snake-l5-summary",
+      "tier": "T1",
+      "mechanism": "none",
+      "expectedTrajectory": "one concern, one or two items; the run should not need a wave to carry it",
+      "expectedStopKinds": [
+        "done",
+        "REPORTED"
+      ],
+      "language": "cpp",
+      "difficulty": "multi-file",
+      "behavioral": true,
+      "rationale": "One module: the board rendering and the sixteen-key summary line.",
+      "prompt": "This workspace holds a working C++ Snake with ONE module removed. `src/summary.hpp` is a stub: `render` returns an empty string and `summary` returns `{}`, so the headless mode prints an empty object however the game went.\n\nImplement `src/summary.hpp` per SPEC.md section 9:\n\n- `render`, the playfield row by row, rows joined by a single `/`, with `.` empty, `#` a body segment, `@` the head and `*` the food. Twenty rows of forty and nineteen separators is 819 characters.\n- `summary`, the sixteen keys IN THE ORDER the section's table gives, with no whitespace between tokens and every number an integer.\n\nRequirement 41 pins the answer exactly: seed 42 with the one-line script `TICK` produces a 1061-byte line, printed in full in the specification. If that line does not reproduce byte for byte, something here is wrong.\n\nChange nothing else.\n\nThe machine has Apple Clang with C++23, CMake, Ninja and the system ncurses (`-lncurses`, `<curses.h>`). There is no network, so a dependency fetched at build time will fail the build.\n\n`tools/run_tests.sh` builds and then runs every executable directly under `tests/`; it fails when there are no tests at all. The graded run executes the built binary and never reads your source.",
+      "seedDir": "bench/corpus/tui-games/snake-cpp-ladder/L5-summary/seed",
+      "hiddenDir": "bench/corpus/tui-games/snake-cpp-ladder/L5-summary/hidden",
+      "hiddenTestCommand": [
+        "/usr/bin/python3",
+        "gauge/run.py",
+        "gauge"
+      ],
+      "repoTestCommand": [
+        "sh",
+        "tools/run_tests.sh"
+      ],
+      "behavioralPaths": [
+        "src/**"
+      ],
+      "runTimeoutSec": 3600
+    },
+    {
+      "id": "snake-l6-terminal",
+      "tier": "T2",
+      "mechanism": "none",
+      "expectedTrajectory": "one concern, one or two items; the run should not need a wave to carry it",
+      "expectedStopKinds": [
+        "done",
+        "REPORTED"
+      ],
+      "language": "cpp",
+      "difficulty": "multi-file",
+      "behavioral": true,
+      "rationale": "The terminal front end, graded under a pseudo-terminal. The largest rung and the second where the approach \u2014 raw escapes or a curses library \u2014 is chosen.",
+      "prompt": "This workspace holds a C++ Snake whose headless mode is complete and correct, with the terminal front end removed. `src/tui.hpp`'s `play()` returns immediately, so `./snake` with no arguments does nothing at all.\n\nImplement the terminal game per SPEC.md section 10. It is driven under a real pseudo-terminal by the graded run, so each of these is something a driver watches:\n\n- the alternate screen entered with `ESC[?1049h` on start and left with `ESC[?1049l` on every exit path, with raw mode undone the same way;\n- the whole playfield drawn with the same four glyphs the summary uses, so the drawn board and the summary's `board` string agree cell for cell;\n- a status line containing `Score:` and the score, plus `PAUSED`, `GAME OVER` and `YOU WIN` when each applies;\n- the arrow keys and `wasd` turning under the same rule the rules module enforces, `p` pausing, `r` restarting, `q` quitting with status 0;\n- `--tick-ms <n>`, where 0 means the game advances only on input;\n- a terminal too small getting a message naming `terminal` and NO broken frame, and a board once it grows.\n\nHow you draw is yours: raw escape sequences or the system ncurses both satisfy this. Change nothing outside the terminal front end.\n\nThe machine has Apple Clang with C++23, CMake, Ninja and the system ncurses (`-lncurses`, `<curses.h>`). There is no network, so a dependency fetched at build time will fail the build.\n\n`tools/run_tests.sh` builds and then runs every executable directly under `tests/`; it fails when there are no tests at all. The graded run executes the built binary and never reads your source.",
+      "seedDir": "bench/corpus/tui-games/snake-cpp-ladder/L6-terminal/seed",
+      "hiddenDir": "bench/corpus/tui-games/snake-cpp-ladder/L6-terminal/hidden",
+      "hiddenTestCommand": [
+        "/usr/bin/python3",
+        "gauge/run.py",
+        "gauge"
+      ],
+      "repoTestCommand": [
+        "sh",
+        "tools/run_tests.sh"
+      ],
+      "behavioralPaths": [
+        "src/**"
+      ],
+      "runTimeoutSec": 5400
+    }
+  ]
+}

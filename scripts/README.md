@@ -639,9 +639,10 @@ cover the corpus runs all six:
 | `bench/corpus-systems.json` | 4 | systems-implementation tasks with conformance suites for gauges |
 | `bench/corpus-perf.json` | 3 | speed gates, where the hidden test is a wall clock |
 | `bench/corpus-games.json` | 3 | TUI games: two headless, driven through a scripted input tape, and one built from scratch in C++ and driven through a pseudo-terminal |
+| `bench/corpus-snake-ladder.json` | 6 | one C++ Snake in six rungs, each sized under the measured one-response delivery window |
 
 A report describes the manifest it was given and says so at the top, which is a claim
-about that set and not about the other five. Fifty-seven tasks is the whole corpus and
+about that set and not about the other six. Sixty-three tasks is the whole corpus and
 twenty-three of them are the POC set, so a campaign that runs the default alone has run
 under half of it with nothing in its own report to say so.
 

@@ -1,0 +1,12 @@
+# Build output. The graded run executes ./snake; the published diff should be
+# the sources that produced it rather than the binary.
+/snake
+*.o
+*.d
+*.dSYM/
+build/
+.cache/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+compile_commands.json
