@@ -76,7 +76,7 @@ import conductor_wiring as cw  # noqa: E402
 #   bench/corpus-systems.json     4 tasks, systems implementation
 #   bench/corpus-repair.json      5 tasks, debugging and repair
 #   bench/corpus-perf.json        3 tasks, performance work
-#   bench/corpus-games.json       2 tasks, TUI games
+#   bench/corpus-games.json       3 tasks, TUI games
 MANIFEST = "bench/corpus-games.json"
 
 # Which tasks to run, by id. EMPTY LIST MEANS EVERY TASK IN THE MANIFEST, which

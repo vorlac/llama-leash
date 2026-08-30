@@ -1,0 +1,16 @@
+# Build output. The graded run executes ./snake, and the published diff should
+# be the sources that produced it rather than the binary itself.
+#
+# This names the one path SPEC.md pins and the directory names a build system
+# conventionally uses. It is not a required layout: a build that puts its
+# objects somewhere else is free to add a line here.
+/snake
+*.o
+*.d
+*.dSYM/
+build/
+.cache/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+compile_commands.json
