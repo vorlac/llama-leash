@@ -87,7 +87,7 @@ MANIFEST = "bench/corpus-snake-ladder.json"
 #
 #   TASKS = []                    every task
 #   TASKS = ["euler-001-py"]      one task (also set MANIFEST to its set)
-TASKS: List[str] = ["snake-l1-bootstrap", "snake-l2-generator", "snake-l3-rules"]
+TASKS: List[str] = ["snake-l1-bootstrap"]
 
 # Which tiers to run. Empty means every tier present in the manifest. Tiers are
 # a wall-clock budget per cell, not a difficulty rating: T0 1800s, T1 2700s,
@@ -154,7 +154,7 @@ ARMS = ("baseline", "doctrine", "conductor")
 #
 #   RESULTS_DIR = None                              fresh, timestamped
 #   RESULTS_DIR = ".data/benchmark/my-campaign"     fixed; resumes
-RESULTS_DIR: Optional[str] = ".data/benchmark/watch/step11-ladder-L1L2L3"
+RESULTS_DIR: Optional[str] = ".data/benchmark/watch/step12-L1-with-room"
 
 # Where each cell's throwaway git repo is built. None means the driver's
 # default, $TMPDIR/llama-leash-conductor-work. The layout underneath is

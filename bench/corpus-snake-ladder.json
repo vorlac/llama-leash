@@ -7,14 +7,15 @@
     "whereTheFreedomIs": "Rungs 1 and 6 are where the approach is chosen: the layout and the build system in rung 1, raw escapes against a curses library in rung 6. Rungs 2 to 5 hand over a layout and measure execution inside it. That is a real loss against a single from-scratch task and it is the price of fitting the delivery window; it is recorded here rather than presented as a design preference.",
     "seedIsGreen": "Rungs 2 to 6 build and pass their own visible suite on arrival - one smoke test over `--version`, which every seed already answers - so a red visible test is the arm's doing. Rung 1 starts RED and cannot do otherwise: its visible suite builds first and there is no build.sh yet, which is the honest state of an empty tree.",
     "calibration": "Every seed FAILS its own gauge and the reference PASSES all six. Failure counts on arrival, which grade with how much a rung removes: L1 5 of 5, L2 18 of 36, L3 21, L4 24, L5 27, L6 10 of 36 - rung 6's headless half is complete, so only the seven pseudo-terminal checks and what they touch can fail.",
-    "languageMix": "cpp only."
+    "languageMix": "cpp only.",
+    "budgets": "7,200 s a cell (9,000 for rung 6), not the 3,600 the first attempt used. Epoch 25 measured the conductor's FIXED overhead on rung 1 - the smallest rung there is - at 36.6 minutes to reach the plan stage: 8.7 classifying, 4.6 on the skeptic, 12.6 decomposing, with the orchestrator's own turns between. Baseline finished the whole task in 4.5 minutes. A 3,600 s budget was sized for the task and not for the machinery, and it cut the conductor off mid-plan; a timeout under a budget smaller than the arm's known overhead measures the budget, not the arm."
   },
   "defaults": {
     "model": "llamacpp/qwen3.8-27b",
     "tierTimeoutSec": {
       "T0": 1800,
-      "T1": 3600,
-      "T2": 5400,
+      "T1": 7200,
+      "T2": 9000,
       "T3": 7200,
       "T4": 3600
     }
@@ -76,7 +77,7 @@
         "src/**",
         "build.sh"
       ],
-      "runTimeoutSec": 3600
+      "runTimeoutSec": 7200
     },
     {
       "id": "snake-l2-generator",
@@ -106,7 +107,7 @@
       "behavioralPaths": [
         "src/**"
       ],
-      "runTimeoutSec": 3600
+      "runTimeoutSec": 7200
     },
     {
       "id": "snake-l3-rules",
@@ -136,7 +137,7 @@
       "behavioralPaths": [
         "src/**"
       ],
-      "runTimeoutSec": 3600
+      "runTimeoutSec": 7200
     },
     {
       "id": "snake-l4-script",
@@ -166,7 +167,7 @@
       "behavioralPaths": [
         "src/**"
       ],
-      "runTimeoutSec": 3600
+      "runTimeoutSec": 7200
     },
     {
       "id": "snake-l5-summary",
@@ -196,7 +197,7 @@
       "behavioralPaths": [
         "src/**"
       ],
-      "runTimeoutSec": 3600
+      "runTimeoutSec": 7200
     },
     {
       "id": "snake-l6-terminal",
@@ -226,7 +227,7 @@
       "behavioralPaths": [
         "src/**"
       ],
-      "runTimeoutSec": 5400
+      "runTimeoutSec": 9000
     }
   ]
 }
