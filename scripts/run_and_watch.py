@@ -78,7 +78,7 @@ import conductor_wiring as cw  # noqa: E402
 #   bench/corpus-perf.json        3 tasks, performance work
 #   bench/corpus-games.json       3 tasks, TUI games
 #   bench/corpus-snake-ladder.json 6 tasks, one C++ Snake in six rungs
-MANIFEST = "bench/corpus-games.json"
+MANIFEST = "bench/corpus-snake-ladder.json"
 
 # Which tasks to run, by id. EMPTY LIST MEANS EVERY TASK IN THE MANIFEST, which
 # is the default and is what "run through all the prompts" means. Naming even
@@ -87,7 +87,7 @@ MANIFEST = "bench/corpus-games.json"
 #
 #   TASKS = []                    every task
 #   TASKS = ["euler-001-py"]      one task (also set MANIFEST to its set)
-TASKS: List[str] = ["snake-tui-cpp"]
+TASKS: List[str] = ["snake-l1-bootstrap", "snake-l2-generator", "snake-l3-rules"]
 
 # Which tiers to run. Empty means every tier present in the manifest. Tiers are
 # a wall-clock budget per cell, not a difficulty rating: T0 1800s, T1 2700s,
@@ -154,7 +154,7 @@ ARMS = ("baseline", "doctrine", "conductor")
 #
 #   RESULTS_DIR = None                              fresh, timestamped
 #   RESULTS_DIR = ".data/benchmark/my-campaign"     fixed; resumes
-RESULTS_DIR: Optional[str] = ".data/benchmark/watch/step10-snake-tui-cpp"
+RESULTS_DIR: Optional[str] = ".data/benchmark/watch/step11-ladder-L1L2L3"
 
 # Where each cell's throwaway git repo is built. None means the driver's
 # default, $TMPDIR/llama-leash-conductor-work. The layout underneath is
