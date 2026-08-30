@@ -33,6 +33,7 @@ import argparse
 import difflib
 import copy
 import fnmatch
+import hashlib
 import json
 import os
 import re
@@ -222,6 +223,7 @@ RESULT_KEYS = (
     "pluginAbsent",
     "timedOut",
     "gauge",
+    "doctrineDigest",
 )
 TOKEN_KEYS = ("prompt", "completion", "total", "partial")
 
@@ -1373,6 +1375,26 @@ def build_doctrine_prompt(doctrine_dir: Any) -> str:
     return "\n".join(chunks)
 
 
+def doctrine_digest(doctrine_dir: Any) -> str:
+    """Which doctrine text a cell ran against, as an md5 of the whole prompt.
+
+    The packs are read from the WORKING TREE at cell setup, not from the index,
+    so an uncommitted edit takes effect on the next cell. Across the 45 paired
+    baseline/doctrine measurements on record the nine packs were rewritten
+    wholesale twice and edited twice more — four generations — and no field in
+    the cell result said which one a cell carried. A reader wanting to know had
+    to reconstruct it from `git log` and file mtimes, and two agents doing
+    exactly that reached opposite answers about which epoch first ran the
+    narrowed `plan.md`.
+
+    The conductor arm already solves this for itself (`packDigest`, over the
+    delivered pack content). This is the same idea for the bench, over the
+    canonical concatenation, so a doctrine cell and a conductor cell from one
+    epoch can be shown to have carried the same pack generation.
+    """
+    return hashlib.md5(build_doctrine_prompt(doctrine_dir).encode("utf-8")).hexdigest()
+
+
 def write_doctrine_prompt(cell_dir: Any, doctrine_dir: Any) -> Path:
     """Materialize the doctrine arm's single generated prompt file."""
     target = Path(cell_dir) / DOCTRINE_PROMPT_NAME
@@ -2211,6 +2233,14 @@ def run_cell(
     }
     work = seed_cell(directory, task, git_runner=git_runner, extra_files=extra)
 
+    # Captured HERE and not at scoring time: the packs are a working-tree glob,
+    # so an edit landing mid-epoch would otherwise label a cell with a text it
+    # never saw. Recorded for both arms that carry doctrine — the doctrine arm
+    # takes all nine verbatim, the conductor arm injects role-selected subsets
+    # of the same files — and null for baseline, which carries none.
+    doctrine_generation = (
+        doctrine_digest(DOCTRINE_DIR) if cell.arm in ("doctrine", "conductor") else None
+    )
     if cell.arm == "doctrine":
         write_doctrine_prompt(directory, DOCTRINE_DIR)
     config = build_arm_config(
@@ -2345,6 +2375,7 @@ def run_cell(
         "pluginAbsent": metrics["pluginAbsent"],
         "timedOut": bool(run_outcome.timed_out),
         "gauge": gauge,
+        "doctrineDigest": doctrine_generation,
     }
     validate_result(result)
     trace.mark("scored", outcome=result["outcome"], gauge=result["gauge"])

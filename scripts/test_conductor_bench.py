@@ -479,6 +479,9 @@ def make_result(
         "pluginAbsent": (False if plugin_absent is None else plugin_absent) if conductor else None,
         "timedOut": outcome == "timeout",
         "gauge": {"ran": True, "passed": passed, "exitCode": exit_code},
+        # Null for baseline, which carries no doctrine at all; a digest for the
+        # two arms that do.
+        "doctrineDigest": None if arm == "baseline" else "0" * 32,
     }
     result.update(over)
     return result
@@ -1792,6 +1795,44 @@ class ArmTests(unittest.TestCase):
 
         self.assertIn("provider", cfg)
         self.assertEqual(cfg["model"], SENTINEL_MODEL)
+
+    def test_doctrine_digest_labels_the_pack_generation(self):
+        """[E23-doctrine-digest] the digest identifies WHICH doctrine text a cell
+        ran, so cells spanning a pack edit stop pooling silently."""
+        temp_doctrine = self.tmp / "digest-doctrine"
+        temp_doctrine.mkdir()
+        (temp_doctrine / "core.md").write_text("first generation\n")
+        first = cb.doctrine_digest(temp_doctrine)
+
+        self.assertRegex(first, r"^[0-9a-f]{32}$", "an md5 hex digest")
+        self.assertEqual(first, cb.doctrine_digest(temp_doctrine), "stable for one text")
+
+        # The property that matters: an edit MOVES it. Two cells an epoch apart
+        # carrying the same digest ran the same prompt; different digests are a
+        # confound the reader can now see instead of having to reconstruct from
+        # git and file mtimes.
+        (temp_doctrine / "core.md").write_text("second generation\n")
+        self.assertNotEqual(first, cb.doctrine_digest(temp_doctrine),
+                            "a pack edit must move the digest")
+
+        second = cb.doctrine_digest(temp_doctrine)
+
+        # A pack ADDED moves it too — the roster is a directory glob, so a tenth
+        # pack joins the arm's prompt without a code change and must not join it
+        # without a label change.
+        (temp_doctrine / "zzz.md").write_text("a tenth pack\n")
+        self.assertNotIn(cb.doctrine_digest(temp_doctrine), {first, second},
+                         "a pack added to the directory must move the digest")
+
+        # And it is the digest OF THE PROMPT, not of some other derivation: the
+        # doctrine arm's materialized file must hash to exactly this value.
+        written = cb.write_doctrine_prompt(self.cell_dir, temp_doctrine)
+        import hashlib
+        self.assertEqual(
+            cb.doctrine_digest(temp_doctrine),
+            hashlib.md5(written.read_bytes()).hexdigest(),
+            "the digest must match the bytes the doctrine arm was actually fed",
+        )
 
     def test_arm_doctrine_packs_verbatim(self):
         """[14.1-arm-doctrine-packs-verbatim] the doctrine arm injects every
@@ -3950,6 +3991,11 @@ class ResultTests(unittest.TestCase):
             # its wall clock, `gauge` says whether the tree it left is right.
             "timedOut",
             "gauge",
+            # Which doctrine text this cell ran against. The packs are globbed
+            # from the WORKING TREE at cell setup, so an uncommitted edit takes
+            # effect immediately and two cells an epoch apart can carry
+            # different system prompts with nothing in the result saying so.
+            "doctrineDigest",
         }
         self.assertEqual(set(cb.RESULT_KEYS), expected_keys)
         self.assertEqual(set(cb.TOKEN_KEYS), {"prompt", "completion", "total", "partial"})
