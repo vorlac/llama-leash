@@ -92,6 +92,7 @@ interface ItemReviewResultShape {
   itemState: ItemState;
   rounds: number;
   surviving: string[];
+  nits: string[];
   questionId: string | null;
 }
 
@@ -102,6 +103,7 @@ interface ItemReviewResultShape {
 const SPEC = "spec/contract";
 const CORRECTNESS = "correctness";
 const GUARDRAIL = "guardrail";
+const MINIMALITY = "minimality";
 const TITLE_MARKER = "ITEM-TITLE-MARKER-III1";
 const ACCEPT_MARKER = "ACCEPTANCE-MARKER-III1";
 const FIX_MARKER = "WORKING-TREE-FIX-MARKER-III1";
@@ -500,13 +502,16 @@ interface FixtureFinding {
   lens: string;
   claim?: string;
   suggestedFix?: string;
+  // Absent means `major`, which is what every row that predates the severity
+  // rows asserted implicitly.
+  severity?: "major" | "minor" | "nit";
 }
 
 function findingsJson(findings: readonly FixtureFinding[], witness: WitnessShape | null): string {
   const body: Record<string, unknown> = {
     findings: findings.map((f) => ({
       id: f.id,
-      severity: "major",
+      severity: f.severity ?? "major",
       lens: f.lens,
       claim: f.claim ?? `finding ${f.id} raised by the ${f.lens} lens`,
       evidence: `${SUBJECT_REL}:1`,
@@ -1054,6 +1059,95 @@ test("[III1-abstention-survives] THE ESCAPE: the skeptic cannot evaluate and ret
   assert.equal(res.ok, false, "the finding survived, so the round could not settle the item");
   assert.equal(res.surviving.length, 1, "exactly the one finding survives its evidence-free refutation");
   assert.equal(bench.wiring.byRole("implementer").length, 1, "the surviving finding was ROUTED TO A FIX, not dropped");
+});
+
+test("[E23-nit-does-not-block] THE COST: a `nit` that SURVIVES its skeptics is still a nit — doctrine review.md's rubric says a nit 'never blocks a merge', so the round settles the item, dispatches no fix, and carries the nit out on the result instead of dropping it", async () => {
+  const bench = seedBench({
+    respond: (req) => {
+      if (req.lenses !== null) {
+        const found = req.lenses.includes(MINIMALITY)
+          ? [{ id: "N1", lens: MINIMALITY, severity: "nit" as const, claim: "the second test is subsumed by the first" }]
+          : [];
+        return { kind: "reply", text: findingsJson(found, honestWitness(req.text)) };
+      }
+      // Upheld if it is ever asked — but it must not be asked. The nit is
+      // CORRECT, which is exactly the case that cost epoch 23 eighty-one minutes.
+      if (req.role === "skeptic") return { kind: "reply", text: verdictJson("N1", true, null) };
+      if (req.role === "implementer" || req.role === "testWriter") {
+        touchSubject(bench, "NIT-ROUTED-FIX");
+        return { kind: "reply", text: implJson() };
+      }
+      return { kind: "reply", text: vetJson() };
+    },
+  });
+
+  const res = await review(bench);
+  assert.equal(res.ok, true, "a round whose only survivor is a nit is a clean round");
+  assert.equal(res.itemState, "REVIEWED", "the item advanced VALIDATED->REVIEWED");
+  assert.equal(res.rounds, 1, "and it took ONE round — a nit does not buy a second fan-out");
+  assert.deepEqual(res.surviving, [], "a nit is not a survivor that blocks the merge");
+  assert.equal(bench.wiring.byRole("implementer").length, 0, "a nit routes no implementer fix");
+  assert.equal(
+    bench.wiring.byRole("testWriter").length,
+    0,
+    "and no test rewrite — which is what keeps the changed test from re-entering the vet (3.3)",
+  );
+  assert.equal(
+    bench.wiring.byRole("skeptic").length,
+    0,
+    "and no SKEPTIC PANEL either — refuting a finding that can demand nothing buys nothing, " +
+      "which is the rule handlePlanReview already states for its own minors and nits",
+  );
+  assert.equal(res.nits.length, 1, "the nit is REPORTED, not silently dropped: it is a suggestion, and suggestions are still worth reading");
+  assert.match(res.nits[0], /N1/, "the reported nit names the finding it came from");
+});
+
+test("[E23-major-still-blocks] the severity split cuts one way only: an upheld MAJOR from the same lens still routes a fix and still denies the advance, so the nit row above is a severity rule and not a hole in the review loop", async () => {
+  const bench = seedBench({
+    respond: (req) => {
+      if (req.lenses !== null) {
+        const found = req.lenses.includes(MINIMALITY)
+          ? [{ id: "M1", lens: MINIMALITY, severity: "major" as const }]
+          : [];
+        return { kind: "reply", text: findingsJson(found, honestWitness(req.text)) };
+      }
+      if (req.role === "skeptic") return { kind: "reply", text: verdictJson("M1", true, null) };
+      if (req.role === "implementer" || req.role === "testWriter") {
+        touchSubject(bench, "MAJOR-ROUTED-FIX");
+        return { kind: "reply", text: implJson() };
+      }
+      return { kind: "reply", text: vetJson() };
+    },
+  });
+
+  const res = await review(bench);
+  assert.equal(res.ok, false, "the surviving major denies the advance");
+  assert.equal(res.surviving.length, 1, "and stands as a survivor");
+  assert.equal(bench.wiring.byRole("implementer").length, 1, "the major was routed to a fix");
+  assert.deepEqual(res.nits, [], "no nit was raised, so none is reported");
+});
+
+test("[E23-minor-still-blocks] a `minor` is not a nit: review.md calls it a real if smaller defect ('fix it or record why not'), so it keeps the loop running exactly as a major does", async () => {
+  const bench = seedBench({
+    respond: (req) => {
+      if (req.lenses !== null) {
+        const found = req.lenses.includes(CORRECTNESS)
+          ? [{ id: "m1", lens: CORRECTNESS, severity: "minor" as const }]
+          : [];
+        return { kind: "reply", text: findingsJson(found, honestWitness(req.text)) };
+      }
+      if (req.role === "skeptic") return { kind: "reply", text: verdictJson("m1", true, null) };
+      if (req.role === "implementer" || req.role === "testWriter") {
+        touchSubject(bench, "MINOR-ROUTED-FIX");
+        return { kind: "reply", text: implJson() };
+      }
+      return { kind: "reply", text: vetJson() };
+    },
+  });
+
+  const res = await review(bench);
+  assert.equal(res.ok, false, "a surviving minor denies the advance");
+  assert.equal(bench.wiring.byRole("implementer").length, 1, "and is routed to a fix");
 });
 
 test("[III1-evidenced-refutation-kills] the symmetry holds in the other direction: a refutation that carries the discriminating input, the run and the reading DOES bury the finding — no fix is dispatched and the item advances", async () => {

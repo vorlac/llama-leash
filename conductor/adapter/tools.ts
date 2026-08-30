@@ -6882,10 +6882,13 @@ export async function handleDispatchWave(input: DispatchWaveInput): Promise<Disp
 //   fanout/subsession.dispatched event naming the configured and clamped
 //   values (no §7.4 vocabulary widening).
 //
-//   SKEPTICS. EVERY finding — regardless of severity, deliberately unlike
-//   handlePlanReview's majors-only rule: plan review answers one binary
-//   question, while item review's output is ROUTED FIXES, and a fix demand
-//   nobody adjudicated is not dispatchable — gets readFanout("skeptics")
+//   SKEPTICS. Every GATING finding — major and minor, a wider net than
+//   handlePlanReview's majors-only rule, because plan review answers one binary
+//   question while item review's output is ROUTED FIXES and a fix demand nobody
+//   adjudicated is not dispatchable. A `nit` is outside that net at step (2b):
+//   doctrine review.md makes it a suggestion that "never blocks a merge", so it
+//   is reported and never routed, and a panel on a finding that can demand
+//   nothing buys nothing. What remains in the net gets readFanout("skeptics")
 //   refuters, and survival is decided by core findingSurvives (⌈k/2⌉,
 //   TIE-UPHOLDS), never re-derived. An under-delivered panel is re-dispatched
 //   ONCE for its missing seats; a verdict still missing after that counts as
@@ -7458,6 +7461,11 @@ export interface ItemReviewResult {
   itemState: ItemState; // the PERSISTED state after the call
   rounds: number; // review rounds run (== item.attempts.reviewRounds)
   surviving: string[]; // finding ids still surviving at exit ([] on a clean exit)
+  // Nits that survived their skeptics, over every round. A nit demands nothing —
+  // doctrine review.md's rubric makes it a suggestion that "never blocks a
+  // merge" — so it is reported rather than routed, and reported rather than
+  // dropped: a correct observation is still worth its reader.
+  nits: string[];
   questionId: string | null; // the "review-round-cap" question (null on a clean exit)
 }
 
@@ -7564,6 +7572,10 @@ export async function handleItemReview(input: ItemReviewInput): Promise<ItemRevi
 
   let rounds = 0;
   let surviving: ItemRaisedFinding[] = [];
+  // Accumulated across rounds, never reset: a nit raised in round 1 is still
+  // worth reporting when round 2 settles the item.
+  const nitsRaised: ItemRaisedFinding[] = [];
+  const nitKeys = (): string[] => nitsRaised.map((entry) => entry.key);
 
   // The stuck exit (a fixer that replied BLOCKED/NEEDS_CONTEXT, or a changed test
   // that failed its own discipline): the item stays at VALIDATED — blocked is a §2.5
@@ -7618,6 +7630,7 @@ export async function handleItemReview(input: ItemReviewInput): Promise<ItemRevi
       itemState: blocked.state,
       rounds,
       surviving: surviving.map((entry) => entry.finding.id),
+      nits: nitKeys(),
       questionId: question.id,
     };
   };
@@ -7651,7 +7664,7 @@ export async function handleItemReview(input: ItemReviewInput): Promise<ItemRevi
       { itemId, state: "REVIEWED", reviewRounds: item.attempts.reviewRounds },
       { runId, itemId },
     );
-    return { ok: true, itemState: item.state, rounds, surviving: [], questionId: null };
+    return { ok: true, itemState: item.state, rounds, surviving: [], nits: nitKeys(), questionId: null };
   };
 
   // One skeptic panel PER finding — k seats each, dispatched as one wave — with
@@ -7942,11 +7955,41 @@ export async function handleItemReview(input: ItemReviewInput): Promise<ItemRevi
       }
     }
 
-    // (2b) skeptics: every finding, k seats, core survival arithmetic.
-    const survivesByEntry = await adjudicate(raised, (entry) =>
+    // (2b) SEVERITY, before the panel (doctrine review.md's rubric). A nit is
+    //      "style or cosmetic only … Zero behavioral impact. A nit is a
+    //      suggestion; it never blocks a merge", and the rubric is explicit that
+    //      severities have different fates. This loop gave them one fate: a nit
+    //      that survived its skeptics routed a fix exactly as a major does, the
+    //      fix edited the tree, the edit sent the test back through the vet
+    //      (§3.3), and the round after it re-ran the six-lens fan-out. Epoch 23
+    //      spent 81 minutes of a 480-minute budget that way — on a nit that was
+    //      CORRECT, and whose fix deleted a subsumed test. It was the only
+    //      finding 18 lens dispatches raised.
+    //
+    //      A nit is therefore reported and never routed. It is not adjudicated
+    //      either, by the rule handlePlanReview already states at its own step
+    //      (b) — refute what GATES, because "they gate nothing, so refuting them
+    //      buys nothing". A panel on a finding that can demand nothing is
+    //      14.4 minutes of the 81 for a verdict no branch reads.
+    //
+    //      The exposure this accepts is the one the severity rubric already
+    //      carries everywhere else: a lens that mislabels a real defect as a nit
+    //      buys itself a pass. review.md answers that directly ("Do not
+    //      down-rank a real defect to `minor` to avoid blocking a merge"), and
+    //      plan review has rested on the same honesty for majors since §3.1.
+    //      `minor` keeps the loop running: review.md calls a minor a real if
+    //      smaller defect, and only a nit "never blocks".
+    const gating: ItemRaisedFinding[] = [];
+    for (const entry of raised) {
+      if (entry.finding.severity === "nit") nitsRaised.push(entry);
+      else gating.push(entry);
+    }
+
+    // Then the panel, over what gates: k seats each, core survival arithmetic.
+    const survivesByEntry = await adjudicate(gating, (entry) =>
       itemSkepticPrompt(entry, k, queueItem, diffBlock, testText, packs),
     );
-    let roundSurvivors = raised.filter((entry) => survivesByEntry.get(entry) === true);
+    let roundSurvivors = gating.filter((entry) => survivesByEntry.get(entry) === true);
 
     // (2c) adjudication ordering (§3.3): a surviving spec/contract finding discards
     //      the round's quality-lens findings — they are re-derived by the NEXT
@@ -8201,6 +8244,7 @@ export async function handleItemReview(input: ItemReviewInput): Promise<ItemRevi
       itemState: blocked.state,
       rounds,
       surviving: survivingIds,
+      nits: nitKeys(),
       questionId: question.id,
     };
   }
