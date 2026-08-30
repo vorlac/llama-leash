@@ -51,7 +51,7 @@ class Bootstrap(unittest.TestCase):
                         "the second build removed ./snake and did not put it back")
 
     def test_version_answers_the_schema(self):
-        """[L1-r5] `./snake --version` prints the schema string and exits 0.
+        """[L1-r51] `./snake --version` prints the schema string and exits 0.
 
         The one behaviour this rung pins. It is in the specification because a
         build that produces an unrunnable binary is not a build, and `--version`
@@ -63,10 +63,10 @@ class Bootstrap(unittest.TestCase):
         self.assertEqual(proc.returncode, 0,
                          "--version exited %d; stderr: %s" % (proc.returncode, proc.stderr[-1500:]))
         self.assertEqual(proc.stdout.strip(), "tui-snake/1",
-                         "SPEC.md: --version must print tui-snake/1, printed %r" % proc.stdout[:200])
+                         "SPEC.md requirement 51: --version must print tui-snake/1, printed %r" % proc.stdout[:200])
 
     def test_the_binary_does_not_need_a_terminal_to_start(self):
-        """[L1-r7] `--version` works with stdout on a pipe, not only on a tty."""
+        """[L1-r51] `--version` answers on a pipe, not only on a tty."""
         snakegauge.require_build(self)
         proc = subprocess.run([snakegauge.binary(), "--version"], cwd=snakegauge.root(),
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE,

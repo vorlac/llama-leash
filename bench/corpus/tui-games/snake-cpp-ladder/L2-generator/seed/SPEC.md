@@ -38,6 +38,8 @@ fully as a CMake project with several targets.
    what is already installed is not available, so a dependency fetched at build
    time will fail the build.
 4. `./build.sh` must be safe to run twice in a row on the same tree.
+   A build that leaves a binary which cannot answer requirement 51
+   has not built the program.
 
 ## 3. The headless mode
 
@@ -249,7 +251,15 @@ pseudo-terminal, so each requirement below is something a driver can see.
 50. The program never busy-waits. With `--tick-ms 0` and no input it consumes no
     measurable CPU.
 
-## 11. What is not required
+## 11. The version flag
+
+51. `./snake --version` prints exactly `tui-snake/1` followed by a newline to
+    standard output, and exits `0`. It is the smallest question that separates a
+    build which produced a runnable binary from one that produced a file, so it
+    answers whether standard output is a terminal or a pipe, and it never opens
+    a terminal, reads a script or plays anything.
+
+## 12. What is not required
 
 There is no menu, no difficulty setting, no high-score file, no configuration
 file, no replay viewer, no sound and no colour requirement. A later task extends
