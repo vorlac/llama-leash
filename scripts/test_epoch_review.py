@@ -150,6 +150,36 @@ class SourceFilesTest(unittest.TestCase):
             (root / ".conductor" / "config.json").write_text("{}")
             self.assertEqual(sorted(source_files(root)), ["src/a.ts"])
 
+    def test_a_compiled_binary_is_named_and_never_inlined(self):
+        """A produced file that is not text is recorded, not pasted.
+
+        The reviewer inlines every file the model produced, which was safe while
+        the corpus was python and TypeScript. The first C++ task put a Mach-O
+        executable in the work tree, and 262 KB of it went verbatim into
+        REVIEW.md — control bytes and all, which the ops-docs gate then refused.
+        The build output is evidence that a build happened; its bytes are not
+        evidence of anything a reader can use.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "src").mkdir()
+            (root / "src" / "main.cpp").write_text("int main() { return 0; }\n")
+            # A Mach-O header, which is what the real case was.
+            blob = b"\xcf\xfa\xed\xfe\x0c\x00\x00\x01\x00\x00\x00\x00__PAGEZERO\x00\x00"
+            (root / "snake").write_bytes(blob)
+            files = source_files(root)
+            self.assertIn("src/main.cpp", files, "the source is still inlined")
+            self.assertIn("snake", files, "the binary is still NAMED — it is evidence")
+            body = files["snake"]
+            self.assertNotIn("\x00", body, "no NUL may reach the markdown")
+            self.assertEqual(
+                [c for c in body if ord(c) < 32 and c not in "\n\t"],
+                [],
+                "no control byte may reach the markdown",
+            )
+            self.assertIn("binary", body.lower(), "it says WHY there is no content")
+            self.assertIn(str(len(blob)), body, "and how large the thing was")
+
 
 if __name__ == "__main__":
     unittest.main()

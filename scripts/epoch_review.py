@@ -379,10 +379,31 @@ def source_files(root: Path) -> Dict[str, str]:
         if any(p in SKIP_DIRS for p in rel.parts) or (rel.parts and rel.parts[0] == "gauge"):
             continue
         try:
-            out[str(rel)] = path.read_text(errors="replace")
+            raw = path.read_bytes()
         except OSError:
             continue
+        out[str(rel)] = _as_reviewable_text(raw, path)
     return out
+
+
+# A produced file is evidence twice over: that it exists, and what is in it. For
+# a compiled binary only the first is readable, and the second is actively
+# harmful — the first C++ task in the corpus put a Mach-O executable in the work
+# tree and 262 KB of it went verbatim into REVIEW.md, control bytes included,
+# which is what the ops-docs gate then refused. The file keeps its NAME and its
+# size; its bytes do not reach the markdown.
+def _as_reviewable_text(raw: bytes, path: Path) -> str:
+    """The file's content when it is text, and a one-line stand-in when it is not.
+
+    A NUL is the test, because it is the one byte that cannot appear in any text
+    a model writes and does appear in the header of every object format. A file
+    that decodes but is full of other control characters is left alone: that is a
+    text file with something odd in it, and hiding it would hide the oddity.
+    """
+    if b"\x00" not in raw:
+        return raw.decode("utf-8", errors="replace")
+    return "(binary, %d bytes — content omitted; the build output is evidence that a build " \
+           "happened, not evidence a reader can use)" % len(raw)
 
 
 def cell_paths(results_dir: Path, work_root: Path, cell_id: str,
