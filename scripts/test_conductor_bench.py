@@ -2639,6 +2639,118 @@ class PlanAndCellTests(unittest.TestCase):
         self.assertIs(result["gauge"]["ran"], False)
         self.assertIsNone(result["gauge"]["passed"])
 
+    def test_a_conductor_run_that_never_terminated_is_a_harness_fault(self):
+        """[D63-unterminated-run] a conductor cell whose run stopped short — a
+        non-terminal state, no stop record, inside its wall clock — is the
+        harness failing, not the arm.
+
+        Epoch 26's signature exactly. `opencode run` breaks its event loop on
+        `session.status{idle}`, which is published BEFORE the `session.idle` the
+        continuation engine hooks, and then exits through an unconditional
+        `finally { process.exit() }` with no drain. So the run cannot be
+        re-prompted and cannot disengage: it ends holding PENDING items, budget
+        and no stop record, and `exitCode 0` is an unset variable rather than a
+        success. Scored `fail`, that is charged to the model; it belongs with the
+        spawn failures and the denied-own-tree cells that `harness-error` already
+        excludes symmetrically.
+        """
+        task = self.tasks[0]
+        cell = make_cell("conductor", task.id, 1)
+        cell_dir = cb.cell_dir_for(self.tmp / "unterminated", cell)
+
+        def runner(invocation):
+            run_dir = Path(invocation.work_dir) / ".conductor" / "runs" / "r-1"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / "run.json").write_text(
+                json.dumps(
+                    {
+                        "runId": "r-1",
+                        "state": "DECOMPOSED",
+                        "stop": None,
+                        "counters": {
+                            "idleRePrompts": 1,
+                            "futileRePrompts": 1,
+                            "overridesUsed": 0,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            return cb.CommandOutcome(0, False, None, 1)
+
+        result = cb.run_cell(
+            cell,
+            task,
+            cell_dir=cell_dir,
+            model=SENTINEL_MODEL,
+            router_config=ROUTER_CONFIG,
+            base_config=BASE_OPENCODE_CONFIG,
+            per_slot_ctx=SERVED_CTX,
+            timeout_sec=600,
+            runner=runner,
+            test_runner=lambda argv, cwd, timeout_sec: cb.CommandOutcome(1, False, None, 1),
+            git_runner=lambda argv, cwd: None,
+        )
+        cb.validate_result(result)
+        self.assertEqual(
+            result["outcome"],
+            "harness-error",
+            "a run left non-terminal with no stop record is the harness's failure",
+        )
+        self.assertIs(result["passed"], False)
+
+    def test_an_unterminated_run_detector_excludes_the_healthy_shapes(self):
+        """[D63-unterminated-run] the three negatives, without which the detector
+        starts discarding cells that are the arm's own result.
+
+        A run that STOPPED (any kind) settled itself. A run in a terminal state
+        settled itself. And a TIMED-OUT run is non-terminal by definition —
+        converting it would destroy the timeout signal the campaign reads cost
+        from, which is the one this detector must not touch.
+        """
+        task = self.tasks[0]
+
+        def run_with(state, stop, timed_out, label):
+            cell = make_cell("conductor", task.id, 1)
+
+            def runner(invocation):
+                run_dir = Path(invocation.work_dir) / ".conductor" / "runs" / "r-1"
+                run_dir.mkdir(parents=True, exist_ok=True)
+                (run_dir / "run.json").write_text(
+                    json.dumps({"runId": "r-1", "state": state, "stop": stop}),
+                    encoding="utf-8",
+                )
+                return cb.CommandOutcome(None if timed_out else 0, timed_out, None, 1)
+
+            return cb.run_cell(
+                cell,
+                task,
+                cell_dir=cb.cell_dir_for(self.tmp / label, cell),
+                model=SENTINEL_MODEL,
+                router_config=ROUTER_CONFIG,
+                base_config=BASE_OPENCODE_CONFIG,
+                per_slot_ctx=SERVED_CTX,
+                timeout_sec=600,
+                runner=runner,
+                test_runner=lambda argv, cwd, timeout_sec: cb.CommandOutcome(0, False, None, 1),
+                git_runner=lambda argv, cwd: None,
+            )
+
+        stopped = run_with("DECOMPOSED", {"kind": "blocked"}, False, "stopped")
+        self.assertNotEqual(
+            stopped["outcome"], "harness-error", "a recorded stop is the run settling itself"
+        )
+        terminal = run_with("REPORTED", None, False, "terminal")
+        self.assertNotEqual(
+            terminal["outcome"], "harness-error", "a terminal state needs no stop record"
+        )
+        timed = run_with("DECOMPOSED", None, True, "timedout")
+        self.assertEqual(
+            timed["outcome"],
+            "timeout",
+            "a timed-out run is non-terminal BY DEFINITION and must keep its timeout",
+        )
+
     def test_report_separates_overran_from_wrong(self):
         """[D01-score-on-timeout] the timeouts section says which of the
         timed-out cells was holding a correct tree, so cost and correctness are

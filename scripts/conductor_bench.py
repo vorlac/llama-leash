@@ -2112,6 +2112,48 @@ def default_cell_invocation_runner(invocation: CellInvocation) -> CommandOutcome
     )
 
 
+def run_never_terminated(work_dir: Any) -> bool:
+    """A conductor run left non-terminal, with no stop record, inside its clock.
+
+    D63: the arm is hosted by `opencode run`, whose event consumer breaks on
+    `session.status{idle}` — published BEFORE the `session.idle` the §3.7
+    continuation engine hooks — and which then exits through an unconditional
+    `finally { process.exit() }` with no drain. So the engine cannot re-prompt
+    and cannot disengage: when the orchestrator stops driving, the run ends
+    holding its items, its budget and no stop record, and the exit code is an
+    unset variable rather than a verdict.
+
+    Scored as `fail` that is charged to the arm. It belongs with the spawn
+    failure and the denied-own-tree cell: the environment stopped the run, not
+    the task. Epoch 20 spent 478 minutes in this state and epoch 26 four.
+
+    Read from the run's own `run.json`, which is the only place the two facts
+    live. A tree with no run directory at all is NOT this fault — that is the
+    zero-request detector's ground, and a cell that never created a run is a
+    different failure with a different fix.
+    """
+    runs = Path(work_dir) / ".conductor" / "runs"
+    if not runs.is_dir():
+        return False
+    latest = None
+    for entry in sorted(runs.iterdir()):
+        candidate = entry / "run.json"
+        if candidate.is_file():
+            latest = candidate
+    if latest is None:
+        return False
+    try:
+        run = json.loads(latest.read_text())
+    except (OSError, ValueError):
+        # An unreadable run.json is not evidence of anything; say nothing.
+        return False
+    if not isinstance(run, dict):
+        return False
+    if run.get("stop") is not None:
+        return False
+    return run.get("state") not in TERMINAL_RUN_STATES
+
+
 def denied_own_tree(log_path: Any, work_dir: Any) -> bool:
     """Whether the cell was refused a tool call on a path inside its own tree.
 
@@ -2304,6 +2346,19 @@ def run_cell(
         fault = "a tool call was denied on a path inside the cell's own tree"
     elif window["requests"] == EMPTY_RUN_REQUESTS:
         fault = "the cell reached the model zero times"
+    elif (
+        cell.arm == "conductor"
+        and not run_outcome.timed_out
+        and run_never_terminated(work)
+    ):
+        # The timeout exclusion is load-bearing: a timed-out run is non-terminal
+        # BY DEFINITION, and converting it here would destroy the one signal the
+        # campaign reads cost from.
+        fault = (
+            "the conductor run ended non-terminal with no stop record and wall "
+            "clock left (D63): the continuation engine cannot re-prompt or "
+            "disengage under `opencode run`"
+        )
     trace.mark("fault-check", requests=window["requests"], fault=fault)
     if run_outcome.spawn_error:
         # Nothing ran, so there is no work to measure - only the seed.
